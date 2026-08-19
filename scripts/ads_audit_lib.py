@@ -667,6 +667,32 @@ def _load_overrides(path: Path | None) -> dict[str, dict[str, str]]:
     return placements
 
 
+def _banner_evidence(source_paths: list[Path], key: str) -> tuple[Path, str] | None:
+    """Find the screen that binds a specific banner placement.
+
+    `AdsManager.loadBanner` is shared by every banner, so its presence proves
+    nothing about one placement. The base binds a banner by naming the config
+    key: `BannerConfig(AdRemoteConfig.banner_home, true)`. Match on the key.
+    """
+    patterns = (
+        rf"BannerConfig\s*\([^)]*\b{re.escape(key)}\b",
+        rf"loadBanner\s*\([^;]{{0,240}}?\b{re.escape(key)}\b",
+        rf"\b{re.escape(key)}\b[^;\n]{{0,120}}?\bfr_banner\b",
+    )
+    for path in source_paths:
+        text = _read(path)
+        if key not in text:
+            continue
+        for pattern in patterns:
+            if re.search(pattern, text, flags=re.S):
+                return path, key
+    return None
+
+
+def _is_banner_placement(placement: "Placement") -> bool:
+    return "banner" in placement.ad_type.casefold() or placement.name.casefold().startswith("banner")
+
+
 def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], overrides: dict[str, dict[str, str]]) -> None:
     source = _combined_text(source_paths)
     # Call sites verified against the Infinity base project (see
@@ -700,11 +726,18 @@ def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source
         "native_permission": ("AdsManager", "loadNativePermission"),
         "native_onboarding_fullscreen_1_4": ("AdsManager", "loadNativeOnboardingFull2"),
         "native_onboarding_fullscreen_2_4": ("AdsManager", "loadNativeOnboardingFull2"),
-        "banner_splash": ("AdsManager", "loadBanner"),
         "reward_example": ("AdsManager", "loadAndShowReward"),
     }
     for placement in contract.placements.values():
         rule_id = f"PLACEMENT_FLOW:{placement.name}"
+        if _is_banner_placement(placement) and placement.name not in overrides:
+            found = _banner_evidence(source_paths, placement.name)
+            if found:
+                path, key = found
+                report.findings.append(Finding.pass_(rule_id, "placement_flow", f"a screen binds `{key}` to its banner container", f"found `{key}` bound in {path.name}", _line_ref(root, path, key)))
+            else:
+                report.findings.append(Finding.needs_mapping(rule_id, placement.description or f"a screen shows `{placement.name}`", f"`{placement.name}` is never bound to a banner container", f"Bind it on the screen that shows it — extend `BaseActivityWithBanner` and override `bannerConfig = BannerConfig(AdRemoteConfig.{placement.name}, ...)` with an `fr_banner` container — or map it in `ads-audit-overrides.yaml`."))
+            continue
         mapping = known.get(placement.name)
         is_optional = False
         if mapping is None and placement.name in optional_screen:

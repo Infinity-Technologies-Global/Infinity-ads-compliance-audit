@@ -310,6 +310,31 @@ class AdsAuditTest(unittest.TestCase):
         self.assertIn("ask the partner", message)
         self.assertNotIn("Could not find a ADS", message)
 
+    def test_banner_placement_needs_its_own_key_not_just_a_shared_loader(self):
+        """AdsManager.loadBanner serves every banner, so it proves nothing about one."""
+        self.write_project()
+        self.ads_csv.write_text(
+            " ,Ads type,Name,ID,Mô tả\n"
+            "1,banner,banner_splash,ca-app-pub-123/555,Banner tren splash\n"
+            ",,APP ID,ca-app-pub-123~999,\n",
+            encoding="utf-8",
+        )
+        manager = self.root / "app/src/main/java/com/example/AdsManager.kt"
+        manager.write_text("object AdsManager { fun loadBanner(a: Any, c: Any, f: Any, i: Boolean) {} }", encoding="utf-8")
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        finding = report.finding("PLACEMENT_FLOW:banner_splash")
+        self.assertEqual(finding.status, "NEEDS_MAPPING")
+        self.assertIn("never bound", finding.observed)
+
+        screen = self.root / "app/src/main/java/com/example/SplashActivity.kt"
+        screen.write_text(
+            screen.read_text(encoding="utf-8")
+            + "\nclass Extra { val bannerConfig = BannerConfig(AdRemoteConfig.banner_splash, false) }\n",
+            encoding="utf-8",
+        )
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertEqual(report.finding("PLACEMENT_FLOW:banner_splash").status, "PASS")
+
     def test_parses_contract_and_project_checklist(self):
         contract = parse_ads_script(self.ads_csv)
         checklist = parse_working_file(self.working_csv)
