@@ -11,11 +11,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ads_audit_lib import Finding, build_webhook_payload, inspect_project, parse_ads_script, parse_working_file, render_summary
+from ads_audit_lib import Finding, findings_payload, inspect_project, parse_ads_script, parse_working_file, render_summary
+from area_rollup import area_rollup
 from doc_sources import DocumentError, is_url, resolve_document
+from sheet_push import build_row, post_row
 
 
 DEFAULT_WEBHOOK_URL = "https://discord.com/api/webhooks/1536937706842755122/SCT5zl1HOoRGL2D2EbOFKmttUN4lCCOTs8PRo9fyoe4sjliFNJEBq76QE-8XkmnLSmCO"
+# The Apps Script Web App bound to the Infinity audit spreadsheet. Safe to embed:
+# the script rejects any request without the matching shared secret, which is
+# deliberately NOT stored here — package_skill.py ships this file to partners.
+DEFAULT_SHEET_URL = "https://script.google.com/macros/s/AKfycbyKxCaMNLKZPlQRGr37QcWbcut-EkkKvazqqsFeKrOstcygchWBjMmNu3uy2ckJNUUyJg/exec"
 CSV_SKIP_DIRS = {".git", ".gradle", ".idea", ".agents", ".codex", "ads-audit-output", "build", "node_modules", "out"}
 
 
@@ -26,9 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--working-file", help="Working checklist: local path or Google Sheets/Docs link (auto-discovered when omitted)")
     parser.add_argument("--output-dir", default="ads-audit-output", help="Directory for report files")
     parser.add_argument("--overrides", help="Optional approved ads-audit-overrides.yaml path")
+    parser.add_argument("--base-project", help="Infinity base checkout to read the placement key list from (default: the list bundled with this skill)")
     parser.add_argument("--webhook-url", help="Override the embedded HTTPS endpoint for a sanitized JSON report")
     parser.add_argument("--webhook-token", help="Optional bearer token; never written to output")
     parser.add_argument("--no-webhook", action="store_true", help="Create local reports only; do not send a webhook")
+    parser.add_argument("--sheet-url", help="Apps Script Web App endpoint for the audit spreadsheet")
+    parser.add_argument("--sheet-token", help="Shared secret for the Apps Script endpoint; never written to output")
+    parser.add_argument("--no-sheet", action="store_true", help="Do not append a row to the audit spreadsheet")
     return parser
 
 
@@ -147,70 +157,36 @@ def post_webhook(url: str, token: str | None, payload: dict, attachment_path: Pa
     return None if 200 <= status < 300 else f"HTTP {status}"
 
 
-def _discord_error_block(index: int, error: dict) -> str:
-    return "\n".join([
-        f"❌ **{index}. {error['tieu_de']}**",
-        "**Mô tả:**",
-        error["mo_ta"],
-        "**Cách sửa:**",
-        error["can_lam"],
-    ])
+def discord_message(area_report) -> dict:
+    """Render the whole audit as one short Discord message.
 
-
-def _fit_discord_block(block: str, max_length: int) -> str:
-    if len(block) <= max_length:
-        return block
-    suffix = "\n... Chi tiết đầy đủ nằm trong file ads-audit-summary.md."
-    return block[: max(0, max_length - len(suffix))].rstrip() + suffix
-
-
-def discord_message_payloads(payload: dict, max_content_length: int = 2000) -> list[dict]:
-    """Render the sanitized MKT payload as one or more Discord messages."""
-    summary = payload["tong_quan"]
-    icon = "🚨" if payload["ket_qua"] == "CẦN SỬA" else "⚠️" if payload["ket_qua"] == "CẦN KỸ THUẬT XÁC NHẬN" else "✅"
-    header_lines = [
-        f"{icon} **Ads Audit: {payload['ket_qua']}**",
-        f"App: {payload['ten_app']}",
-        f"Package: `{payload['package_name']}`",
-        f"Tổng: ❌ {summary['loi_can_sua']} lỗi | ⚠️ {summary['can_ky_thuat_xac_nhan']} cần xác nhận | ✅ {summary['muc_da_kiem_tra_dung']} đạt",
+    Five areas, one line each. The summary file stays on disk rather than being
+    attached, because the areas are what people act on.
+    """
+    icon = "✅" if area_report.overall == "Done" else "🚨"
+    width = max(len(area.name) for area in area_report.areas)
+    identity_limit = 400
+    app_name = area_report.app_name[: identity_limit - 1] + "…" if len(area_report.app_name) > identity_limit else area_report.app_name
+    package_name = area_report.package_name[: identity_limit - 1] + "…" if len(area_report.package_name) > identity_limit else area_report.package_name
+    lines = [
+        f"{icon} **Ads Audit — {app_name}**",
+        f"`{package_name}`",
+        "",
     ]
-    sections = ["\n".join(header_lines)]
-    errors = payload["loi"]
-    if errors:
-        sections.append("❌ **Lỗi cần sửa:**")
-        for index, error in enumerate(errors, start=1):
-            sections.append(_discord_error_block(index, error))
-    confirmations = payload["can_xac_nhan"]
-    if confirmations:
-        sections.append("⚠️ **Cần xác nhận:**")
-        sections.extend(f"{index}. {item}" for index, item in enumerate(confirmations, start=1))
-    sections.append("File ads-audit-summary.md được đính kèm bên dưới để xem chi tiết.")
-
-    chunks: list[str] = []
-    current = ""
-    for section in sections:
-        separator = "\n" if current else ""
-        candidate = current + separator + section
-        if len(candidate) <= max_content_length:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = _fit_discord_block(section, max_content_length)
-    if current:
-        chunks.append(current)
-
-    if len(chunks) > 1:
-        for index in range(1, len(chunks)):
-            prefix = f"**Ads Audit chi tiết ({index + 1}/{len(chunks)})**\n"
-            chunks[index] = prefix + _fit_discord_block(chunks[index], max_content_length - len(prefix))
-
-    return [{"content": chunk, "allowed_mentions": {"parse": []}} for chunk in chunks]
+    for area in area_report.areas:
+        suffix = f": {area.reason}" if area.status == "Error" and area.reason else ""
+        lines.append(f"{area.name.ljust(width)} → {area.status}{suffix}")
+    if area_report.note:
+        lines.extend(["", f"Khác: {area_report.note}"])
+    return {"content": "\n".join(lines), "allowed_mentions": {"parse": []}}
 
 
-def discord_message_payload(payload: dict) -> dict:
-    """Backward-compatible first Discord message."""
-    return discord_message_payloads(payload)[0]
+def checklist_name(report) -> str:
+    return report.checklist.app_name or Path(report.project_root).name
+
+
+def checklist_package(report) -> str:
+    return report.checklist.package_name or "<chưa tìm thấy>"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,15 +199,15 @@ def main(argv: list[str] | None = None) -> int:
         doc_cache = output_dir / "source-documents"
         ads_script = resolve_csv_input(project, args.ads_script, "ads", doc_cache)
         working_file = resolve_csv_input(project, args.working_file, "working", doc_cache)
-        report = inspect_project(project, parse_ads_script(ads_script), parse_working_file(working_file), args.overrides)
+        report = inspect_project(project, parse_ads_script(ads_script), parse_working_file(working_file), args.overrides, args.base_project)
     except (OSError, ValueError, DocumentError, json.JSONDecodeError) as error:
         print(f"Audit setup error: {error}", file=sys.stderr)
         return 1
-    payload = build_webhook_payload(project.name, report.checklist, report.findings, report.readiness())
+    area_report = area_rollup(report.findings, checklist_name(report), checklist_package(report))
     summary_path = output_dir / "ads-audit-summary.md"
-    evidence_path = output_dir / "ads-audit-evidence.json"
-    summary_path.write_text(render_summary(report), encoding="utf-8")
-    evidence_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    findings_path = output_dir / "ads-audit-findings.json"
+    summary_path.write_text(render_summary(report, area_report), encoding="utf-8")
+    findings_path.write_text(json.dumps(findings_payload(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     webhook_url = None if args.no_webhook else (
         args.webhook_url
         or os.environ.get("ADS_AUDIT_WEBHOOK_URL")
@@ -239,23 +215,27 @@ def main(argv: list[str] | None = None) -> int:
         or DEFAULT_WEBHOOK_URL
     )
     if webhook_url:
-        error = None
-        for index, message in enumerate(discord_message_payloads(payload)):
-            error = post_webhook(
-                webhook_url,
-                args.webhook_token,
-                message,
-                attachment_path=summary_path if index == 0 else None,
-            )
-            if error:
-                break
+        error = post_webhook(webhook_url, args.webhook_token, discord_message(area_report))
         if error:
             report.findings.append(Finding.needs_runtime("WEBHOOK_DELIVERY", "successful webhook delivery", error, "Check the configured Discord webhook, TLS, authorization and network, then rerun the audit."))
-            payload = build_webhook_payload(project.name, report.checklist, report.findings, report.readiness())
-            summary_path.write_text(render_summary(report), encoding="utf-8")
-            evidence_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            area_report = area_rollup(report.findings, checklist_name(report), checklist_package(report))
+            summary_path.write_text(render_summary(report, area_report), encoding="utf-8")
+            findings_path.write_text(json.dumps(findings_payload(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    sheet_token = args.sheet_token or os.environ.get("ADS_AUDIT_SHEET_TOKEN")
+    sheet_url = None if args.no_sheet else (args.sheet_url or os.environ.get("ADS_AUDIT_SHEET_URL") or DEFAULT_SHEET_URL)
+    if sheet_url and not sheet_token:
+        # A partner running this skill has no business writing to Infinity's
+        # sheet, so a missing secret is a skip, not a failure.
+        print("Sheet push skipped: set ADS_AUDIT_SHEET_TOKEN or pass --sheet-token.", file=sys.stderr)
+    elif sheet_url:
+        error = post_row(sheet_url, build_row(area_report, sheet_token))
+        if error:
+            report.findings.append(Finding.needs_runtime("SHEET_DELIVERY", "successful Google Sheet row append", error, "Check the Apps Script deployment, its shared secret, and network access, then rerun the audit."))
+            area_report = area_rollup(report.findings, checklist_name(report), checklist_package(report))
+            summary_path.write_text(render_summary(report, area_report), encoding="utf-8")
+            findings_path.write_text(json.dumps(findings_payload(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Summary: {summary_path}")
-    print(f"Evidence: {evidence_path}")
+    print(f"Findings: {findings_path}")
     return 2 if report.readiness() == "BLOCKED" else 0
 
 

@@ -1,11 +1,7 @@
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.pytest_cache/
+*.pyc
+*.pyo
 ads-audit-output/
-node_modules/
-.DS_Store
-.idea/
-.vscode/
-*.zip
+.pytest_cache/
+infinity-ads-compliance-audit.zip
+.superpowers/

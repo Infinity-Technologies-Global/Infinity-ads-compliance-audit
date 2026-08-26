@@ -70,7 +70,8 @@ Antigravity (`~/.gemini/antigravity/skills`) — so never assume a fixed path.
 Run it yourself from the app root. Do not ask the partner to type commands.
 
 ```bash
-python3 "/absolute/path/to/this-skill/scripts/run_audit.py" --project .
+python3 "/absolute/path/to/this-skill/scripts/run_audit.py" --project . \
+  --base-project /home/infinity01/StudioProjects/TestSill
 ```
 
 Both documents are auto-discovered from CSV files in the project. Pass them
@@ -92,7 +93,7 @@ then falls back to guarded content inference. If it reports an ambiguous
 layout, stop and ask for a clearer header — never guess between tied columns.
 
 Then read `ads-audit-output/ads-audit-summary.md` and
-`ads-audit-evidence.json`, and check every `FAIL`, `NEEDS_MAPPING`, and
+`ads-audit-output/ads-audit-findings.json`, and check every `FAIL`, `NEEDS_MAPPING`, and
 `NEEDS_RUNTIME_PROOF` against the actual code before reporting.
 
 ## Reference material
@@ -175,36 +176,72 @@ For a class, event, or placement not inferable from the CSV, copy
 mapping. Preserve the CSV key and ID exactly. A new key may differ from the base
 project, but its architecture must still follow the base pattern.
 
-## Webhook
+## Reporting
 
-After the local report is written, the bundled Discord webhook receives the MKT
-payload and `ads-audit-summary.md`. Use `--no-webhook` only when the partner
-asks for a local-only audit. `--webhook-url`, or `ADS_AUDIT_WEBHOOK_URL` /
-`DISCORD_WEBHOOK_URL`, override the embedded endpoint when Infinity authorises
-another destination.
+The audit reports five areas of the ads journey, each `Done` or `Error`:
 
-The payload follows [report schema](references/report-schema.json), carries
-`ten_app` and `package_name`, and gives MKT a short Vietnamese error list with
-no secrets and no `app-ads.txt` checks. Each Discord error renders compactly:
-title, then bold `**Mô tả:**` with no blank line, plain-language detail about the
-broken flow, then bold `**Cách sửa:**` on its own line with concrete developer
-actions. If the report exceeds one message, split into `Ads Audit chi tiết
-(2/N)`, `(3/N)`, and attach the summary to the first message only.
+| Area | Covers |
+| --- | --- |
+| **Init** | `GlobalApp` init order, DevConfig fields, `ERainAdConfig`, AppOpen exclusions, interstitial interval, lifecycle observer registration |
+| **Splash** | RemoteConfig, `inter_splash`, `banner_splash`, `open_resume`, and the native-language preload from `onAdLoaded` |
+| **Language** | DevSetting, native click load, onboarding page-1 preload, observer swap with `removeObservers`, render and hide |
+| **Onboarding** | Preloads, page LiveData mapping, `viewLifecycleOwner`, and the interstitial before Home |
+| **Config** | Release `ad_config.json` keys and IDs, AdMob app id, and coverage against the base's own key list |
+
+An area is `Error` only when it has a `FAIL`. `NEEDS_MAPPING` and
+`NEEDS_RUNTIME_PROOF` never turn an area red — they mean static analysis could
+not settle the claim, not that the app is wrong.
+
+Failures outside the five areas — Welcome/Resume, Banner, service tokens,
+Firebase, direct SDK calls — are summarised in a single Note line. They still set
+the exit code to `2`.
+
+Three outputs:
+
+- `ads-audit-output/ads-audit-summary.md` — the five-area table plus each failure.
+- `ads-audit-output/ads-audit-findings.json` — every finding, for deep debugging.
+- One Discord message, and one row appended to the audit spreadsheet.
+
+### Discord
+
+```
+🚨 Ads Audit — My App
+`com.example.app`
+
+Init       → Done
+Splash     → Done
+Language   → Error: thiếu removeObservers
+Onboarding → Done
+Config     → Error: thiếu 3 key
+
+Khác: banner chưa dùng BaseActivityWithBanner
+```
+
+Disable with `--no-webhook`. Override with `--webhook-url` or
+`ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`.
+
+### Audit spreadsheet
+
+One row per audit: `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`.
+
+The endpoint is embedded; the shared secret is not. Set `ADS_AUDIT_SHEET_TOKEN`
+or pass `--sheet-token`, otherwise the push is skipped with a note on stderr.
+Disable with `--no-sheet`. `templates/apps-script-sheet.gs` is the receiving
+script.
 
 ## Partner-facing result format
 
 Reply in the partner's language, in this shape:
 
 ```text
-Result: BLOCKED | REVIEW_REQUIRED
+Init       → Done
+Splash     → Done
+Language   → Error: thiếu removeObservers
+Onboarding → Done
+Config     → Error: thiếu 3 key
 
-BLOCKER / ERROR
-- [rule] file:line — observed problem. Fix: concrete change.
-
-NEEDS MAPPING / RUNTIME PROOF
-- [rule] why static evidence is insufficient. Next proof: exact action and expected result.
-
-Passed: N static checks.
+Khác: <một dòng>
 ```
 
-Never output raw Adjust, Facebook client, TikTok, webhook, or other secret values.
+Add `file:line` for each `Error` only when the partner asks for detail. Never
+output raw Adjust, Facebook client, TikTok, webhook, or sheet secret values.

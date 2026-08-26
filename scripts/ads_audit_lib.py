@@ -12,12 +12,19 @@ from collections import Counter
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
+
+if TYPE_CHECKING:  # avoids a circular import at runtime; area_rollup imports Finding
+    from area_rollup import AreaReport
 
 
 SECRET_LABELS = {"Adjust token", "Facebook Client token", "Tiktok token"}
 SKIP_DIRS = {".git", ".gradle", "build", ".idea", ".worktrees", "out"}
 SOURCE_SUFFIXES = {".kt", ".java"}
+
+# Captures the owner argument of every observe(...) call, tolerating the line
+# wrapping and spacing that ktlint produces.
+_OBSERVE_OWNER = re.compile(r"\.observe\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 _HEADER_ALIASES = {
     "id": {
@@ -141,6 +148,55 @@ _KNOWN_AD_TYPES = {
     "rewarded",
     "rewardedinterstitial",
 }
+
+
+# The 24 placement keys defined by the Infinity base project TestSill
+# (com.itg.template), verified against its app/src/main/assets/ad_config.json
+# on 2026-08-26. Pass --base-project to read the list from a base checkout
+# instead, which is what tracks a base that has moved on.
+BASE_PLACEMENT_KEYS = (
+    "inter_splash",
+    "banner_splash",
+    "open_resume",
+    "native_language_1",
+    "native_language_1_click",
+    "native_language_2",
+    "native_language_2_click",
+    "native_onboarding_1_1",
+    "native_onboarding_2_1",
+    "native_onboarding_1_4",
+    "native_onboarding_2_4",
+    "native_onboarding_fullscreen_1_3",
+    "native_onboarding_fullscreen_2_3",
+    "native_onboarding_fullscreen_1_4",
+    "native_onboarding_fullscreen_2_4",
+    "native_permission",
+    "native_home",
+    "inter_onboarding",
+    "banner_home",
+    "native_survey",
+    "native_confirm_uninstall",
+    "native_welcome",
+    "inter_welcome",
+    "reward_example",
+)
+
+
+def base_placement_keys(base_project: str | Path | None = None) -> tuple[str, ...]:
+    """Return the base placement keys, from a base checkout when one is given."""
+    if base_project is None:
+        return BASE_PLACEMENT_KEYS
+    config_path = Path(base_project) / "app" / "src" / "main" / "assets" / "ad_config.json"
+    if not config_path.is_file():
+        raise ValueError(
+            f"Base project has no ad_config.json at {config_path}. "
+            f"Point --base-project at the root of the Infinity base checkout, "
+            f"or omit it to use the {len(BASE_PLACEMENT_KEYS)} keys bundled with this skill."
+        )
+    config = _config_data(config_path)
+    if not config:
+        raise ValueError(f"Base project ad_config.json is empty or not valid JSON: {config_path}")
+    return tuple(config)
 
 
 @dataclass(frozen=True)
@@ -667,6 +723,32 @@ def _load_overrides(path: Path | None) -> dict[str, dict[str, str]]:
     return placements
 
 
+def _banner_evidence(source_paths: list[Path], key: str) -> tuple[Path, str] | None:
+    """Find the screen that binds a specific banner placement.
+
+    `AdsManager.loadBanner` is shared by every banner, so its presence proves
+    nothing about one placement. The base binds a banner by naming the config
+    key: `BannerConfig(AdRemoteConfig.banner_home, true)`. Match on the key.
+    """
+    patterns = (
+        rf"BannerConfig\s*\([^)]*\b{re.escape(key)}\b",
+        rf"loadBanner\s*\([^;]{{0,240}}?\b{re.escape(key)}\b",
+        rf"\b{re.escape(key)}\b[^;\n]{{0,120}}?\bfr_banner\b",
+    )
+    for path in source_paths:
+        text = _read(path)
+        if key not in text:
+            continue
+        for pattern in patterns:
+            if re.search(pattern, text, flags=re.S):
+                return path, key
+    return None
+
+
+def _is_banner_placement(placement: "Placement") -> bool:
+    return "banner" in placement.ad_type.casefold() or placement.name.casefold().startswith("banner")
+
+
 def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], overrides: dict[str, dict[str, str]]) -> None:
     source = _combined_text(source_paths)
     # Call sites verified against the Infinity base project (see
@@ -700,11 +782,18 @@ def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source
         "native_permission": ("AdsManager", "loadNativePermission"),
         "native_onboarding_fullscreen_1_4": ("AdsManager", "loadNativeOnboardingFull2"),
         "native_onboarding_fullscreen_2_4": ("AdsManager", "loadNativeOnboardingFull2"),
-        "banner_splash": ("AdsManager", "loadBanner"),
         "reward_example": ("AdsManager", "loadAndShowReward"),
     }
     for placement in contract.placements.values():
         rule_id = f"PLACEMENT_FLOW:{placement.name}"
+        if _is_banner_placement(placement) and placement.name not in overrides:
+            found = _banner_evidence(source_paths, placement.name)
+            if found:
+                path, key = found
+                report.findings.append(Finding.pass_(rule_id, "placement_flow", f"a screen binds `{key}` to its banner container", f"found `{key}` bound in {path.name}", _line_ref(root, path, key)))
+            else:
+                report.findings.append(Finding.needs_mapping(rule_id, placement.description or f"a screen shows `{placement.name}`", f"`{placement.name}` is never bound to a banner container", f"Bind it on the screen that shows it — extend `BaseActivityWithBanner` and override `bannerConfig = BannerConfig(AdRemoteConfig.{placement.name}, ...)` with an `fr_banner` container — or map it in `ads-audit-overrides.yaml`."))
+            continue
         mapping = known.get(placement.name)
         is_optional = False
         if mapping is None and placement.name in optional_screen:
@@ -914,7 +1003,7 @@ def _check_global_base_rules(report: AuditReport, root: Path, global_app: Path |
     )
 
 
-def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list[Path]) -> None:
+def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list[Path], contract: AuditContract) -> None:
     splash = _source_by_class(source_paths, "SplashActivity")
     splash_text = _read(splash) if splash else ""
     _check_tokens(
@@ -951,6 +1040,28 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         splash,
     )
 
+    # The base defines banner_splash but wires it to no screen. Partner apps do
+    # show it, so a contract that lists the key and a Splash that never binds it
+    # is a defect rather than a mapping gap.
+    if "banner_splash" in contract.placements:
+        expected = "SplashActivity binds `banner_splash` to its banner container"
+        evidence = _banner_evidence([splash] if splash else [], "banner_splash")
+        if evidence:
+            path, key = evidence
+            report.findings.append(Finding.pass_(
+                "FLOW_SPLASH_BANNER", "placement_flow", expected, f"found `{key}` bound in {path.name}",
+                _line_ref(root, path, key),
+            ))
+        else:
+            report.findings.append(Finding.fail(
+                "FLOW_SPLASH_BANNER",
+                "placement_flow",
+                expected,
+                "`banner_splash` is never bound on SplashActivity",
+                "Bind it on Splash: extend `BaseActivityWithBanner` and override `bannerConfig = BannerConfig(AdRemoteConfig.banner_splash, ...)` with an `fr_banner` container.",
+                _location(root, splash),
+            ))
+
     language = _source_by_class(source_paths, "LanguageActivity")
     language_text = _read(language) if language else ""
     _check_tokens(
@@ -973,6 +1084,17 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         language_text,
         ("postDelayed", "100L", "loadNativeLanguageClick", "loadNativeOnboarding1", "nativeLanguageAdLive.observe", "nativeLanguageClickAdLive.observe", "populateNativeAdView", "flAds.goneView"),
         "Preserve Language native/click rendering and onboarding page-1 preload after the short base delay.",
+        language,
+    )
+    _check_tokens(
+        report,
+        root,
+        "FLOW_LANGUAGE_OBSERVER_SWAP",
+        "placement_flow",
+        "Language removes the other native observer when swapping between the two",
+        language_text,
+        ("AdsManager.nativeLanguageAdLive.removeObservers", "AdsManager.nativeLanguageClickAdLive.removeObservers"),
+        "Call removeObservers on the observer you are leaving before observing the other one; both left active makes the ad container flicker between two ads.",
         language,
     )
 
@@ -1003,6 +1125,29 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "Keep OnboardingPageFragment LiveData mapping for page 1, page 4, and fullscreen native ads.",
         onboarding_page,
     )
+
+    # Only meaningful once the fragment exists and observes something; a missing
+    # fragment or a missing observe call is already FLOW_ONBOARDING_PAGE_RENDERING.
+    owners = _OBSERVE_OWNER.findall(onboarding_page_text) if onboarding_page else []
+    if owners:
+        wrong = sorted({owner for owner in owners if owner != "viewLifecycleOwner"})
+        if wrong:
+            report.findings.append(Finding.fail(
+                "FLOW_ONBOARDING_PAGE_LIFECYCLE",
+                "placement_flow",
+                "onboarding page observes its ad LiveData with viewLifecycleOwner",
+                f"observes with: {', '.join(wrong)}",
+                "Observe with `viewLifecycleOwner`; the fragment lifecycle leaks observers as ViewPager2 recycles pages.",
+                _line_ref(root, onboarding_page, ".observe("),
+            ))
+        else:
+            report.findings.append(Finding.pass_(
+                "FLOW_ONBOARDING_PAGE_LIFECYCLE",
+                "placement_flow",
+                "onboarding page observes its ad LiveData with viewLifecycleOwner",
+                "found",
+                _line_ref(root, onboarding_page, "observe("),
+            ))
 
     resume_rule = _source_by_class(source_paths, "ResumeAdsEntryRule")
     resume_rule_text = _read(resume_rule) if resume_rule else ""
@@ -1120,6 +1265,59 @@ def _check_ads_manager_base_rules(report: AuditReport, root: Path, manager_paths
     )
 
 
+def _release_config_keys(root: Path) -> tuple[set[str], str | None] | None:
+    """Return the release config's placement keys and its location, or None."""
+    candidates = sorted(
+        (path for path in _files(root, {".json"}) if path.name == "ad_config.json"),
+        key=lambda path: (len(path.relative_to(root).parts), str(path)),
+    )
+    if not candidates:
+        return None
+    config = _config_data(candidates[0])
+    if config is None:
+        return None
+    return set(config), str(candidates[0].relative_to(root))
+
+
+def _check_base_key_coverage(report: AuditReport, root: Path, base_keys: tuple[str, ...]) -> None:
+    """Compare the app's release placement keys against the base's own key list."""
+    expected = f"all {len(base_keys)} base placement keys present"
+    found = _release_config_keys(root)
+    if found is None:
+        report.findings.append(Finding.fail(
+            "BASE_KEY_COVERAGE",
+            "ad_config",
+            expected,
+            "ad_config.json is missing or not valid JSON",
+            "Add `app/src/main/assets/ad_config.json` carrying the base placement keys.",
+        ))
+        return
+    keys, location = found
+    missing = [key for key in base_keys if key not in keys]
+    extra = sorted(key for key in keys if key not in base_keys)
+    if missing:
+        report.findings.append(Finding.fail(
+            "BASE_KEY_COVERAGE",
+            "ad_config",
+            expected,
+            f"missing {len(missing)}: {', '.join(missing)}",
+            "Copy the missing keys from the base `ad_config.json` and set this app's own ad unit IDs.",
+            location,
+        ))
+    else:
+        report.findings.append(Finding.pass_("BASE_KEY_COVERAGE", "ad_config", expected, "found", location))
+    if extra:
+        # An extra key is not wrong on its own: partner apps legitimately add
+        # placements, provided the architecture still follows the base pattern.
+        report.findings.append(Finding.needs_mapping(
+            "BASE_KEY_EXTRA",
+            "placement keys defined by the base project",
+            f"{len(extra)} extra: {', '.join(extra)}",
+            "Confirm each extra placement is Infinity-approved and follows the base pattern, then map it in `ads-audit-overrides.yaml`.",
+            location,
+        ))
+
+
 def _release_admob_app_id(gradle_text: str) -> str | None:
     """Read the AdMob app id from the release build type only.
 
@@ -1146,7 +1344,7 @@ def _release_admob_app_id(gradle_text: str) -> str | None:
     return _first_match(r'app_id\s*[:=]\s*["\'](ca-app-pub-[^"\']+)', gradle_text)
 
 
-def inspect_project(root: str | Path, contract: AuditContract, checklist: ProjectChecklist, overrides_path: str | Path | None = None) -> AuditReport:
+def inspect_project(root: str | Path, contract: AuditContract, checklist: ProjectChecklist, overrides_path: str | Path | None = None, base_project: str | Path | None = None) -> AuditReport:
     root = Path(root).resolve()
     report = AuditReport(str(root), contract, checklist)
     gradle_paths = [path for path in _files(root, {".gradle", ".kts"}) if path.name.startswith("build.gradle")]
@@ -1173,6 +1371,7 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
             break
     _check_equal(report, "APP_NAME", "identity", checklist.app_name, app_name, "Set `app_name` to the working checklist value.")
     _check_config(report, root, contract, "ad_config.json", "RELEASE")
+    _check_base_key_coverage(report, root, base_placement_keys(base_project))
     searchable = _combined_text(all_text_paths)
     for key, value in checklist.required_values.items():
         _check_equal(report, f"TOKEN:{key}", "token", value, value if value and value in searchable else None, f"Add the configured {key} using the approved Android resource/build configuration.", redact=key in SECRET_LABELS)
@@ -1241,7 +1440,7 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     else:
         report.findings.append(Finding.pass_("ARCH_DIRECT_SDK_BYPASS", "architecture", "no unapproved direct Activity SDK calls", "none found"))
     _check_primary_screen_activities(report, root, manifests, source_paths, navigation_paths)
-    _check_screen_flow_rules(report, root, source_paths)
+    _check_screen_flow_rules(report, root, source_paths, contract)
     if overrides_path is None and (root / "ads-audit-overrides.yaml").is_file():
         overrides_path = root / "ads-audit-overrides.yaml"
     overrides = _load_overrides(Path(overrides_path) if overrides_path else None)
@@ -1250,380 +1449,91 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     return report
 
 
-def _mkt_error(finding: Finding) -> dict[str, str]:
-    if finding.rule_id == "ARCH_PRIMARY_SCREENS_ACTIVITY":
-        return {
-            "tieu_de": "Cấu trúc màn hình chưa đúng base",
-            "mo_ta": "App đang dùng 1 Activity và nhiều Fragment cho các màn chính có quảng cáo.",
-            "can_lam": "Dev chuyển Splash, Language, Onboarding, Home hoặc Welcome đang dùng Fragment thành Activity riêng theo base Infinity.",
+def findings_payload(report: AuditReport) -> list[dict[str, Any]]:
+    """Every finding as a plain dict, for `ads-audit-findings.json`."""
+    return [
+        {
+            "rule_id": finding.rule_id,
+            "category": finding.category,
+            "status": finding.status,
+            "expected": finding.expected,
+            "observed": finding.observed,
+            "recommendation": finding.recommendation,
+            "location": finding.location,
         }
-    return {
-        "tieu_de": "Cần dev kiểm tra phần gắn quảng cáo",
-        "mo_ta": "Có lỗi gắn quảng cáo chưa đúng base.",
-        "can_lam": "Dev kiểm tra và sửa theo ads-audit-summary.md.",
-    }
-
-
-def _mkt_area_for_finding(finding: Finding) -> tuple[str, str, str] | None:
-    rule_id = finding.rule_id
-    if rule_id == "ARCH_PRIMARY_SCREENS_ACTIVITY":
-        return (
-            "Cấu trúc màn hình chưa đúng base",
-            "App đang dùng 1 Activity/Fragment cho màn chính có quảng cáo.",
-            "Dev chuyển Splash, Language, Onboarding, Home hoặc Welcome đang dùng Fragment thành Activity riêng theo base Infinity.",
-        )
-    if rule_id.startswith(("ARCH_GLOBAL_", "ARCH_DEV_CONFIG", "ARCH_ADS_CONFIG", "ARCH_APP_OPEN", "ARCH_MOBILE_ADS", "ARCH_REMOTE_CONFIG", "ARCH_ERAIN", "ARCH_INTERSTITIAL_INTERVAL")):
-        return (
-            "Khởi tạo Ads/Config chưa đúng base",
-            "Sai hoặc thiếu phần init ads/config.",
-            "Dev sửa GlobalApp/build.gradle theo thứ tự base: MobileAds -> DevConfig -> AdRemoteConfig -> ERainAd.",
-        )
-    if rule_id.startswith(("ARCH_ADS_MANAGER", "ARCH_ENABLE_GATE", "ARCH_PURCHASE_GATE", "ARCH_NETWORK_GATE", "ARCH_UA_GATE", "ARCH_DIRECT_SDK_BYPASS", "FLOW_INTER_ONBOARDING_SHOW", "FLOW_INTER_WELCOME_SHOW")):
-        return (
-            "AdsManager chưa đúng base",
-            "Sai hoặc thiếu central load/show/gate trong AdsManager.",
-            "Dev đưa load/show về AdsManager và giữ đủ isEnable, purchase, network, config.enableUaCheck, callback close/fail.",
-        )
-    if rule_id.startswith("ARCH_BANNER"):
-        return (
-            "Banner chưa đúng base",
-            "Sai hoặc thiếu BaseActivityWithBanner/banner reload.",
-            "Dev dùng BaseActivityWithBanner, AdsManager.loadBanner và reloadIntervalSeconds theo config.",
-        )
-    if rule_id.startswith("FLOW_SPLASH"):
-        return (
-            "Flow Splash chưa đúng base",
-            "Sai hoặc thiếu luồng Splash ads.",
-            "Dev giữ consent/RemoteConfig, inter_splash, preload native language ở onAdLoaded và điều hướng ở onNextAction.",
-        )
-    if rule_id.startswith("FLOW_LANGUAGE"):
-        return (
-            "Flow Language chưa đúng base",
-            "Sai hoặc thiếu luồng Language ads.",
-            "Dev giữ DevSetting tvTitle, load native click, preload onboarding page 1 và observe/render/hide native ads.",
-        )
-    if rule_id.startswith("FLOW_ONBOARDING"):
-        return (
-            "Flow Onboarding chưa đúng base",
-            "Sai hoặc thiếu luồng Onboarding ads.",
-            "Dev giữ preload native page 4/full/inter, page LiveData mapping và show inter_onboarding trước khi vào Home.",
-        )
-    if rule_id.startswith(("FLOW_RESUME", "FLOW_WELCOME", "FLOW_INTER_WELCOME_BACK")):
-        return (
-            "Flow Resume/Welcome chưa đúng base",
-            "Sai hoặc thiếu luồng resume/welcome ads.",
-            "Dev giữ ResumeAdsEntryRule, AppLifecycleObserver, WelcomeActivity load/show và gate AppOpen/purchase/UA.",
-        )
-    return None
-
-
-def _mkt_detail_for_area(title: str, rule_ids: list[str], fallback_description: str, fallback_action: str) -> tuple[str, str]:
-    rules = set(rule_ids)
-    if title == "Khởi tạo Ads/Config chưa đúng base":
-        details = []
-        if rules & {"ARCH_GLOBAL_INIT_ORDER", "ARCH_MOBILE_ADS_INIT", "ARCH_DEV_CONFIG_INIT", "ARCH_REMOTE_CONFIG_INIT", "ARCH_ERAIN_INIT"}:
-            details.append("Mobile Ads, DevConfig, config quảng cáo và SDK quảng cáo chưa được khởi tạo đúng thứ tự.")
-        if rules & {"ARCH_DEV_CONFIG_BUILD_FIELDS"}:
-            details.append("Thiếu thông tin version thư viện ads trong build.gradle nên màn DevConfig khó kiểm tra đúng.")
-        if rules & {"ARCH_ADS_CONFIG_FIELDS", "ARCH_INTERSTITIAL_INTERVAL"}:
-            details.append("Thiếu cấu hình tracking hoặc khoảng cách hiển thị quảng cáo inter theo base.")
-        if rules & {"ARCH_APP_OPEN_EXCLUSIONS"}:
-            details.append("Chưa loại trừ các màn Splash, Language, Onboarding khỏi quảng cáo mở lại app, dễ làm quảng cáo chồng lên nhau.")
-        description = "\n".join(f"- {detail}" for detail in details) or fallback_description
-        action = "\n".join([
-            "- Trong GlobalApp, khởi tạo lần lượt: MobileAds -> DevConfig -> AdRemoteConfig -> ERainAd.",
-            "- Bổ sung đủ version fields trong build.gradle và giữ interval interstitial theo base.",
-            "- Tắt App Open Resume ở các màn Splash, Language, Onboarding và các màn đặc biệt theo base.",
-        ])
-        return description, action
-    if title == "Flow Splash chưa đúng base":
-        details = []
-        if "FLOW_SPLASH_REMOTE_CONFIG" in rules:
-            details.append("Splash chưa lấy và áp dụng cấu hình quảng cáo từ RemoteConfig đúng điểm bắt đầu app.")
-        if "FLOW_SPLASH_INTER_PRELOAD_LANGUAGE" in rules:
-            details.append("Native Language phải được preload ở Splash sau khi inter_splash tải thành công; audit chưa thấy đúng vị trí này.")
-        if "FLOW_SPLASH_OPEN_RESUME" in rules:
-            details.append("Open Resume chưa được bật/tắt theo cấu hình sau khi Splash lấy xong config.")
-        description = "\n".join(f"- {detail}" for detail in details) or fallback_description
-        action = "\n".join([
-            "- Trong SplashActivity, lấy RemoteConfig rồi cập nhật AdRemoteConfig trước khi load quảng cáo.",
-            "- Chỉ gọi preload Native Language trong callback onAdLoaded của inter_splash.",
-            "- Sau khi quảng cáo đóng, lỗi hoặc bị bỏ qua, mới chuyển màn trong onNextAction.",
-        ])
-        return description, action
-    if title == "Flow Language chưa đúng base":
-        details = []
-        if "FLOW_LANGUAGE_DEV_SETTING" in rules:
-            details.append("Màn Language thiếu lối vào DevSetting trên tiêu đề để QA kiểm tra cấu hình ads.")
-        if "FLOW_LANGUAGE_PRELOAD_AND_RENDER" in rules:
-            details.append("Language chưa load quảng cáo click và preload quảng cáo cho trang Onboarding đầu tiên đúng thời điểm.")
-            details.append("Phần hiển thị native Language cần lắng nghe dữ liệu quảng cáo, có ad thì render, không có ad hoặc mất mạng thì ẩn khung ads.")
-        description = "\n".join(f"- {detail}" for detail in details) or fallback_description
-        action = "\n".join([
-            "- Trong LanguageActivity, giữ DevSetting trên tvTitle.",
-            "- Sau khoảng delay ngắn, load Native Language Click và preload Native Onboarding page 1.",
-            "- Khi nhận ad thì render vào container; khi null hoặc offline thì ẩn container ads.",
-        ])
-        return description, action
-    if title == "Flow Onboarding chưa đúng base":
-        details = []
-        if "FLOW_ONBOARDING_PRELOAD_AND_SHOW" in rules:
-            details.append("Onboarding chưa preload đủ native page 4, native fullscreen và inter_onboarding trước khi người dùng tới bước cuối.")
-            details.append("Inter Onboarding phải show khi bấm Next ở trang cuối, rồi mới vào Home sau callback đóng/lỗi.")
-        if "FLOW_ONBOARDING_PAGE_RENDERING" in rules:
-            details.append("Các trang Onboarding chưa map đúng nguồn ad cho page 1, page 4 hoặc fullscreen.")
-        description = "\n".join(f"- {detail}" for detail in details) or fallback_description
-        action = "\n".join([
-            "- Trong OnBoardingActivity, preload native page 4, native fullscreen và inter_onboarding sau khi màn được tạo.",
-            "- Trong OnboardingPageFragment, page nào có ads thì lắng nghe đúng nguồn ad và render/ẩn theo kết quả load.",
-            "- Ở trang cuối, gọi showInterOnboarding và chỉ vào Home trong callback.",
-        ])
-        return description, action
-    if title == "AdsManager chưa đúng base":
-        details = []
-        if rules & {"ARCH_ADS_MANAGER_NATIVE_GATES", "ARCH_ENABLE_GATE", "ARCH_PURCHASE_GATE", "ARCH_NETWORK_GATE", "ARCH_UA_GATE", "ARCH_ADS_MANAGER_UA_GATES"}:
-            details.append("AdsManager chưa giữ đủ điều kiện bật quảng cáo, trạng thái mua VIP, mạng và kiểm tra người dùng trước khi load/show.")
-        if rules & {"ARCH_ADS_MANAGER_INTER_GATES", "FLOW_INTER_ONBOARDING_SHOW", "FLOW_INTER_WELCOME_SHOW"}:
-            details.append("Quảng cáo inter cần đi tiếp màn hình qua callback đóng/lỗi, không được phụ thuộc vào nút test hoặc điều kiện debug.")
-        if "ARCH_DIRECT_SDK_BYPASS" in rules:
-            details.append("Có màn hình gọi SDK quảng cáo trực tiếp thay vì đi qua AdsManager, dễ lệch flow giữa các app.")
-        if "ARCH_ADS_MANAGER_BANNER" in rules:
-            details.append("Banner chưa đi qua hàm quản lý chung trong AdsManager.")
-        description = "\n".join(f"- {detail}" for detail in details) or fallback_description
-        action = "\n".join([
-            "- Đưa toàn bộ load/show quảng cáo về AdsManager.",
-            "- Trước khi load/show, kiểm tra đủ: ads đang bật, user chưa mua VIP, có mạng và điều kiện hiển thị từ config.",
-            "- Với inter, chỉ chuyển màn sau callback đóng/lỗi quảng cáo.",
-        ])
-        return description, action
-    if title == "Banner chưa đúng base":
-        return (
-            "- Banner cần dùng màn base có sẵn để tự load lại theo thời gian cấu hình.\n- Nếu tự load banner ở từng màn, app dễ bị lệch vị trí hiển thị hoặc reload không đúng.",
-            "- Cho màn có banner kế thừa BaseActivityWithBanner.\n- Cấu hình BannerConfig và để AdsManager.loadBanner xử lý load/reload theo reloadIntervalSeconds.",
-        )
-    if title == "Flow Resume/Welcome chưa đúng base":
-        return (
-            "- App cần chọn một trong hai luồng khi mở lại app: App Open hoặc Welcome, không để hai loại quảng cáo chồng lên nhau.\n- Welcome phải load native/inter khi mở màn và chỉ đóng màn sau callback của inter.",
-            "- Giữ ResumeAdsEntryRule để quyết định Open Resume hoặc Welcome.\n- Trong AppLifecycleObserver, kiểm tra màn đang mở, trạng thái mua VIP và điều kiện hiển thị trước khi vào Welcome.\n- Trong WelcomeActivity, load native/inter rồi show inter ở nút bắt đầu.",
-        )
-    return fallback_description, fallback_action
-
-
-def _limited_list(values: list[str], label: str, limit: int = 10) -> str:
-    unique = list(dict.fromkeys(value for value in values if value))
-    shown = unique[:limit]
-    suffix = f" và {len(unique) - len(shown)} {label} khác" if len(unique) > len(shown) else ""
-    return ", ".join(shown) + suffix
-
-
-def _config_key(rule_id: str, label: str) -> str | None:
-    prefix = f"AD_CONFIG_{label}:"
-    if not rule_id.startswith(prefix):
-        return None
-    key = rule_id[len(prefix):]
-    if key.startswith("ENABLE:"):
-        key = key[len("ENABLE:"):]
-    return "file config" if key == "FILE" else key
-
-
-def _group_mkt_errors(findings: list[Finding]) -> list[dict[str, str]]:
-    app_field_names = {
-        "APP_NAME": "app_name",
-        "APP_PACKAGE": "package_name",
-        "ADMOB_APP_ID": "AdMob App ID",
-        "ADMOB_MANIFEST_META": "AdMob App ID",
-    }
-    app_findings = [finding for finding in findings if finding.status == "FAIL" and finding.rule_id in app_field_names]
-    app_fields = [app_field_names[finding.rule_id] for finding in app_findings]
-    grouped: list[dict[str, str]] = []
-    if app_fields:
-        details = "; ".join(
-            f"{app_field_names[finding.rule_id]}: expected `{finding.expected}`, observed `{finding.observed}`"
-            for finding in app_findings
-        )
-        grouped.append({
-            "tieu_de": "Thông tin app chưa khớp checklist",
-            "mo_ta": f"Sai hoặc thiếu: {_limited_list(app_fields, 'field')}. {details}.",
-            "can_lam": "Dev đối chiếu working file và cập nhật thông tin app.",
-        })
-    release_keys = [
-        key for finding in findings if finding.status == "FAIL"
-        for key in [_config_key(finding.rule_id, "RELEASE")] if key
+        for finding in report.findings
     ]
-    if release_keys:
-        grouped.append({
-            "tieu_de": "Cấu hình quảng cáo release (ad_config.json) chưa đúng",
-            "mo_ta": f"Key sai hoặc thiếu: {_limited_list(release_keys, 'key')}.",
-            "can_lam": "Dev cập nhật key và ID trong `ad_config.json` theo file ADS SCRIPTS.",
-        })
-    if any(finding.status == "FAIL" and finding.category == "token" for finding in findings):
-        grouped.append({
-            "tieu_de": "Thiếu cấu hình dịch vụ cần thiết",
-            "mo_ta": "Một hoặc nhiều cấu hình dịch vụ bắt buộc đang thiếu hoặc chưa khớp.",
-            "can_lam": "Dev kiểm tra ads-audit-summary.md và cập nhật các cấu hình còn thiếu.",
-        })
-    grouped_areas: dict[str, dict[str, Any]] = {}
-    fallback_findings: list[Finding] = []
-    for finding in findings:
-        if (
-            finding.status != "FAIL"
-            or finding.rule_id in app_field_names
-            or finding.rule_id.startswith("AD_CONFIG_")
-            or finding.category == "token"
-        ):
-            continue
-        area = _mkt_area_for_finding(finding)
-        if area is None:
-            fallback_findings.append(finding)
-            continue
-        title, description, action = area
-        entry = grouped_areas.setdefault(title, {
-            "tieu_de": title,
-            "mo_ta": description,
-            "can_lam": action,
-            "rules": [],
-        })
-        entry["rules"].append(finding.rule_id)
-    for entry in grouped_areas.values():
-        rules = entry.pop("rules")
-        entry["mo_ta"], entry["can_lam"] = _mkt_detail_for_area(entry["tieu_de"], rules, entry["mo_ta"], entry["can_lam"])
-        grouped.append(entry)
-    seen = {(entry["tieu_de"], entry["mo_ta"], entry["can_lam"]) for entry in grouped}
-    for finding in fallback_findings:
-        entry = _mkt_error(finding)
-        fingerprint = (entry["tieu_de"], entry["mo_ta"], entry["can_lam"])
-        if fingerprint not in seen:
-            grouped.append(entry)
-            seen.add(fingerprint)
-    return grouped
 
 
-def _group_mkt_confirmations(findings: list[Finding]) -> list[str]:
-    mapping_keys = [
-        finding.rule_id.split(":", 1)[1]
-        for finding in findings
-        if finding.status == "NEEDS_MAPPING" and finding.rule_id.startswith("PLACEMENT_FLOW:")
-    ]
-    runtime_journeys = [
-        finding.rule_id.split(":", 1)[1]
-        for finding in findings
-        if finding.status == "NEEDS_RUNTIME_PROOF" and ":" in finding.rule_id
-    ]
-    confirmations = []
-    if mapping_keys:
-        confirmations.append(f"Cần mapping placement: {_limited_list(mapping_keys, 'placement')}.")
-    if runtime_journeys:
-        confirmations.append(f"Cần test thực tế: {_limited_list(runtime_journeys, 'journey')}.")
-    return confirmations
+def render_summary(report: AuditReport, area_report: "AreaReport") -> str:
+    """Render the short five-area summary.
 
-
-def build_webhook_payload(
-    project_name: str,
-    checklist: ProjectChecklist | list[Finding] | None = None,
-    findings: list[Finding] | str | None = None,
-    readiness: str | None = None,
-) -> dict[str, Any]:
-    if isinstance(checklist, list):
-        # Backward-compatible call: build_webhook_payload(project, findings, readiness).
-        if isinstance(findings, str) and readiness is None:
-            readiness = findings
-        findings = checklist
-        checklist = None
-    if findings is None:
-        findings = []
-    if isinstance(findings, str):
-        findings = []
-    counts = Counter(finding.status.lower() for finding in findings)
-    status = readiness or ("BLOCKED" if counts["fail"] else "REVIEW_REQUIRED")
-    if counts["fail"]:
-        result = "CẦN SỬA"
-    elif counts["needs_mapping"] or counts["needs_runtime_proof"]:
-        result = "CẦN KỸ THUẬT XÁC NHẬN"
-    else:
-        result = "ĐẠT"
-    errors = _group_mkt_errors(findings)
-    confirmations = _group_mkt_confirmations(findings)
-    return {
-        "ket_qua": result,
-        "ten_app": (checklist.app_name if isinstance(checklist, ProjectChecklist) else None) or project_name,
-        "package_name": (checklist.package_name if isinstance(checklist, ProjectChecklist) else None) or "<chưa tìm thấy>",
-        "tong_quan": {
-            "loi_can_sua": counts["fail"],
-            "can_ky_thuat_xac_nhan": counts["needs_mapping"] + counts["needs_runtime_proof"],
-            "muc_da_kiem_tra_dung": counts["pass"],
-        },
-        "loi": errors,
-        "can_xac_nhan": confirmations,
-        "trang_thai_ky_thuat": status,
-    }
-
-
-def render_summary(report: AuditReport) -> str:
+    The full finding list lives in ads-audit-findings.json; this file is the
+    version a person reads, so it stays around forty lines.
+    """
     counts = report.counts()
-    payload = build_webhook_payload(Path(report.project_root).name, report.checklist, report.findings, report.readiness())
     lines = [
         "# Infinity Ads Compliance Audit",
         "",
-        f"**Readiness:** {report.readiness()}",
-        f"**Project:** `{report.project_root}`",
-        f"**Contract:** `{report.contract.source}`",
+        f"**App:** {area_report.app_name}",
+        f"**Package:** `{area_report.package_name}`",
+        f"**Ngày:** {area_report.audit_date}",
+        f"**Kết quả:** {area_report.overall}",
         "",
-        "## Summary",
-        "",
-        f"- ❌ FAIL: {counts.get('fail', 0)}",
-        f"- ⚠️ NEEDS_MAPPING: {counts.get('needs_mapping', 0)}",
-        f"- 🔍 NEEDS_RUNTIME_PROOF: {counts.get('needs_runtime_proof', 0)}",
-        f"- ✅ PASS: {counts.get('pass', 0)}",
-        "",
-        "## MKT short report",
-        "",
-        f"- Kết quả: {payload['ket_qua']}",
-        f"- App: {payload['ten_app']}",
-        f"- Package: `{payload['package_name']}`",
-        f"- Tổng: ❌ {payload['tong_quan']['loi_can_sua']} lỗi | ⚠️ {payload['tong_quan']['can_ky_thuat_xac_nhan']} cần xác nhận | ✅ {payload['tong_quan']['muc_da_kiem_tra_dung']} đạt",
-        "",
+        "| Vùng | Kết quả | Lý do |",
+        "| --- | --- | --- |",
     ]
-    if payload["loi"]:
-        lines.extend(["### ❌ Lỗi cần sửa", ""])
-        for index, error in enumerate(payload["loi"], start=1):
-            lines.append(f"❌ **{index}. {error['tieu_de']}**")
-            lines.append("**Mô tả:**")
-            lines.append(error["mo_ta"])
-            lines.append("**Cách sửa:**")
-            lines.append(error["can_lam"])
-        lines.append("")
-    if payload["can_xac_nhan"]:
-        lines.extend(["### ⚠️ Cần xác nhận", ""])
-        lines.extend(f"{index}. {item}" for index, item in enumerate(payload["can_xac_nhan"], start=1))
-        lines.append("")
+    lines.extend(
+        f"| {area.name} | {area.status} | {area.reason or '—'} |"
+        for area in area_report.areas
+    )
     lines.extend([
-        "## Required actions",
+        "",
+        f"Khác: {area_report.note}" if area_report.note else "Khác: —",
+        "",
+        f"Tổng: ❌ {counts.get('fail', 0)} FAIL | ⚠️ {counts.get('needs_mapping', 0)} NEEDS_MAPPING "
+        f"| 🔍 {counts.get('needs_runtime_proof', 0)} NEEDS_RUNTIME_PROOF | ✅ {counts.get('pass', 0)} PASS",
         "",
     ])
-    actions = [finding for finding in report.findings if finding.status != "PASS"]
-    if not actions:
-        lines.append("No static-rule failures. Complete all runtime proof cases before release approval.")
-    config_actions = [finding for finding in actions if finding.rule_id.startswith("AD_CONFIG_")]
-    for group in ("AD_CONFIG_RELEASE",):
-        group_actions = [finding for finding in config_actions if finding.rule_id.startswith(group + ":") and ":ENABLE:" not in finding.rule_id]
-        if group_actions:
-            names = ", ".join(finding.rule_id.split(":", 1)[1] for finding in group_actions)
+
+    delivery_findings = [
+        finding for finding in report.findings
+        if finding.rule_id in {"WEBHOOK_DELIVERY", "SHEET_DELIVERY"}
+    ]
+    if delivery_findings:
+        lines.extend(["## Giao hàng", ""])
+        for finding in delivery_findings:
             lines.extend([
-                f"### ❌ FAIL — `{group}` ({len(group_actions)} placements)",
-                f"Keys with missing/mismatched IDs: {names}",
-                "Fix: align every listed key and ID with ADS SCRIPTS; see `ads-audit-evidence.json` for exact expected/observed IDs.",
+                f"- **{finding.rule_id}**",
+                f"  Thực tế: {finding.observed}",
+                f"  Sửa: {finding.recommendation}",
                 "",
             ])
-    for finding in actions:
-        if finding in config_actions:
-            continue
-        status_icon = "❌" if finding.status == "FAIL" else "⚠️" if finding.status == "NEEDS_MAPPING" else "🔍"
-        location = f" ({finding.location})" if finding.location else ""
+
+    failures = [finding for finding in report.findings if finding.status == "FAIL"]
+    if not failures:
+        lines.append("Không có lỗi tĩnh. Hoàn thành các ca kiểm thử runtime trước khi duyệt phát hành.")
+        return "\n".join(lines)
+
+    lines.extend(["## Chi tiết lỗi", ""])
+    config_failures = [f for f in failures if f.rule_id.startswith("AD_CONFIG_RELEASE:")]
+    if config_failures:
+        names = ", ".join(f.rule_id.split(":", 1)[1] for f in config_failures)
         lines.extend([
-            f"### {status_icon} {finding.status} — `{finding.rule_id}`{location}",
-            f"Expected: {finding.expected}",
-            f"Observed: {finding.observed}",
-            f"Fix: {finding.recommendation}",
+            f"- **AD_CONFIG_RELEASE** ({len(config_failures)} key): {names}",
+            "  Sửa: khớp từng key và ID với file ADS SCRIPTS.",
             "",
         ])
+    for finding in failures:
+        if finding in config_failures:
+            continue
+        location = f" ({finding.location})" if finding.location else ""
+        lines.extend([
+            f"- **{finding.rule_id}**{location}",
+            f"  Mong đợi: {finding.expected}",
+            f"  Thực tế: {finding.observed}",
+            f"  Sửa: {finding.recommendation}",
+            "",
+        ])
+    lines.append("Chi tiết đầy đủ: `ads-audit-findings.json`.")
     return "\n".join(lines)
