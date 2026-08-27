@@ -27,6 +27,33 @@ import area_rollup  # noqa: E402
 import sheet_push  # noqa: E402
 
 
+class PackageSkillTest(unittest.TestCase):
+    def test_partner_package_excludes_internal_docs_and_workspace_metadata(self):
+        """Internal planning files must never become partner-package contents."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "skill"
+            (root / "docs" / "superpowers").mkdir(parents=True)
+            (root / ".superpowers" / "sdd").mkdir(parents=True)
+            (root / ".claude").mkdir()
+            (root / "scripts").mkdir()
+            (root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            (root / "README.md").write_text("# partner docs\n", encoding="utf-8")
+            (root / "scripts" / "run.py").write_text("print('audit')\n", encoding="utf-8")
+            (root / "docs" / "superpowers" / "internal.md").write_text("internal plan\n", encoding="utf-8")
+            (root / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
+            (root / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+
+            output = package_skill.package_skill(root, Path(directory) / "partner.zip")
+
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+
+        self.assertEqual(
+            names,
+            {"skill/SKILL.md", "skill/README.md", "skill/scripts/run.py"},
+        )
+
+
 class AdsAuditTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
