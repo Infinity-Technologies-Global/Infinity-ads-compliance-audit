@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,8 @@ class PackageSkillTest(unittest.TestCase):
             (root / "docs" / "superpowers").mkdir(parents=True)
             (root / ".superpowers" / "sdd").mkdir(parents=True)
             (root / ".claude").mkdir()
+            (root / ".codex").mkdir()
+            (root / ".agents").mkdir()
             (root / "scripts").mkdir()
             (root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
             (root / "README.md").write_text("# partner docs\n", encoding="utf-8")
@@ -42,6 +45,8 @@ class PackageSkillTest(unittest.TestCase):
             (root / "docs" / "superpowers" / "internal.md").write_text("internal plan\n", encoding="utf-8")
             (root / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
             (root / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+            (root / ".codex" / "settings.json").write_text("internal settings\n", encoding="utf-8")
+            (root / ".agents" / "state.json").write_text("internal settings\n", encoding="utf-8")
 
             output = package_skill.package_skill(root, Path(directory) / "partner.zip")
 
@@ -52,6 +57,53 @@ class PackageSkillTest(unittest.TestCase):
             names,
             {"skill/SKILL.md", "skill/README.md", "skill/scripts/run.py"},
         )
+
+
+class InstallScriptTest(unittest.TestCase):
+    def test_installer_excludes_internal_files_from_the_installed_skill(self):
+        """A local install must have the same release boundary as a ZIP package."""
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            source = fixture / "source"
+            shutil.copytree(
+                repo_root,
+                source,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "ads-audit-output", "node_modules"),
+            )
+            (source / ".superpowers" / "sdd").mkdir(parents=True, exist_ok=True)
+            (source / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
+            (source / ".claude").mkdir(exist_ok=True)
+            (source / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+            (source / ".codex").mkdir(exist_ok=True)
+            os.chmod(source / ".codex", 0o755)
+            (source / ".codex" / "settings.json").write_text("internal settings\n", encoding="utf-8")
+            (source / ".agents").mkdir(exist_ok=True)
+            os.chmod(source / ".agents", 0o755)
+            (source / ".agents" / "state.json").write_text("internal state\n", encoding="utf-8")
+            home = fixture / "home"
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True)
+            environment = os.environ.copy()
+            environment.update({"HOME": str(home), "CODEX_HOME": str(codex_home)})
+
+            completed = subprocess.run(
+                ["bash", str(source / "install.sh")],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            installed = codex_home / "skills" / "infinity-ads-compliance-audit"
+            self.assertTrue((installed / "SKILL.md").is_file())
+            self.assertTrue((installed / "scripts" / "run_audit.py").is_file())
+            self.assertFalse((installed / "docs").exists())
+            self.assertFalse((installed / ".superpowers").exists())
+            self.assertFalse((installed / ".claude").exists())
+            self.assertFalse((installed / ".codex").exists())
+            self.assertFalse((installed / ".agents").exists())
 
 
 class AdsAuditTest(unittest.TestCase):

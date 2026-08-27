@@ -49,7 +49,29 @@ fi
 echo "⏳ Installing skill files..."
 for target in "${TARGETS[@]}"; do
     mkdir -p "$target"
-    rsync -a --exclude='.git' --exclude='CLAUDE.md' --exclude='__pycache__' --exclude='*.pyc' --exclude='ads-audit-output' --exclude='node_modules' "$SCRIPT_DIR/" "$target/" 2>/dev/null || cp -R "$SCRIPT_DIR/"* "$target/"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a \
+            --exclude='.agents' \
+            --exclude='.claude' \
+            --exclude='.codex' \
+            --exclude='.git' \
+            --exclude='.pytest_cache' \
+            --exclude='.superpowers' \
+            --exclude='CLAUDE.md' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='ads-audit-output' \
+            --exclude='docs' \
+            --exclude='node_modules' \
+            "$SCRIPT_DIR/" "$target/"
+    else
+        for item in "$SCRIPT_DIR"/*; do
+            case "$(basename "$item")" in
+                CLAUDE.md|__pycache__|ads-audit-output|docs|node_modules) continue ;;
+            esac
+            cp -R "$item" "$target/"
+        done
+    fi
     echo "   ✅ Installed to: $target"
 done
 

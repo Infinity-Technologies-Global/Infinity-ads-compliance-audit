@@ -65,8 +65,8 @@ ads cho project này"). Gõ `/` hoặc `$` là cách chắc chắn nhất.
 
 Nếu 2 file CSV đã nằm sẵn trong project thì bỏ hẳn phần Tài liệu — skill tự tìm.
 
-AI sẽ chạy auditor, đọc báo cáo, đối chiếu từng lỗi với code thật, rồi gửi báo
-cáo đã lọc bí mật lên Discord — trừ khi bạn yêu cầu chỉ chạy local.
+AI sẽ chạy auditor, đọc các báo cáo local, rồi đối chiếu từng lỗi với code thật.
+Việc gửi Discord hoặc bảng tính là tùy chọn và cần cấu hình rõ ràng.
 
 ### Hai tài liệu đầu vào
 
@@ -156,7 +156,7 @@ hợp đồng. Một số vị trí — `native_home`, `native_permission`,
 `native_onboarding_fullscreen_*_4`, `reward_example` — có sẵn
 trong `AdsManager` nhưng dự án cơ sở không gắn vào màn nào, nên được xếp ở đây theo thiết kế.
 
-## Điểm nhận Discord
+## Điểm nhận Discord (tùy chọn)
 
 Mỗi lần kiểm tra gửi một tin nhắn ngắn, không có tệp đính kèm:
 
@@ -178,7 +178,7 @@ Việc gửi Discord chỉ được bật khi cấu hình rõ ràng. Đặt đi�
 `DISCORD_WEBHOOK_URL`. Nếu không có, auditor chỉ giữ báo cáo cục bộ. Dùng
 `--no-webhook` để bỏ qua cấu hình được kế thừa từ môi trường.
 
-## Bảng tính kiểm tra
+## Bảng tính kiểm tra (tùy chọn)
 
 Mỗi lần kiểm tra thêm một hàng:
 
@@ -205,8 +205,9 @@ tra vẫn thành công. Tắt hẳn bằng `--no-sheet`, hoặc trỏ đến nơ
 Dùng cho CI hoặc khi cần debug; cách chuẩn vẫn là gọi qua AI ở trên.
 
 ```bash
-python3 scripts/run_audit.py --project /duong/dan/app --no-webhook
+python3 scripts/run_audit.py --project /duong/dan/app --no-webhook --no-sheet
 python3 scripts/run_audit.py --project . \
+  --no-webhook --no-sheet \
   --ads-script "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "./working file.csv"
 ```

@@ -68,9 +68,9 @@ Both hosts also select the skill on their own when you simply describe the task
 If the two CSV files already sit in the project, drop the Documents block —
 they are discovered automatically.
 
-The agent runs the bundled auditor, reads the generated reports, checks each
-finding against the code, and sends the sanitized report to Discord unless you
-ask for a local-only run.
+The agent runs the bundled auditor, reads the generated local reports, and
+checks each finding against the code. Discord or spreadsheet delivery is
+optional and requires explicit configuration.
 
 ### The two documents
 
@@ -160,7 +160,7 @@ key and ID exactly. Some placements — `native_home`, `native_permission`,
 `AdsManager` but are not wired to a screen in the base, so they land here by
 design.
 
-## Discord webhook
+## Optional Discord webhook
 
 One short message per audit, no attachment:
 
@@ -182,7 +182,7 @@ Discord delivery is opt-in. Configure the endpoint with `--webhook-url` or the
 one, the audit keeps only the local reports. Use `--no-webhook` to ignore an
 inherited environment configuration.
 
-## Audit spreadsheet
+## Optional audit spreadsheet
 
 Each audit appends one row:
 
@@ -210,8 +210,9 @@ succeeds. Disable it outright with `--no-sheet`, or point somewhere else with
 Useful for CI or debugging; the AI path above is the intended one.
 
 ```bash
-python3 scripts/run_audit.py --project /path/to/app --no-webhook
+python3 scripts/run_audit.py --project /path/to/app --no-webhook --no-sheet
 python3 scripts/run_audit.py --project . \
+  --no-webhook --no-sheet \
   --ads-script "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "./working file.csv"
 ```

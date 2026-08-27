@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { discoverCsv, resolveInputs, buildAuditArgs } from '../bin/infinity-ads-audit.js';
+import { discoverCsv, resolveInputs, buildAuditArgs, helpText } from '../bin/infinity-ads-audit.js';
 
 function fixture() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ads-audit-cli-'));
@@ -46,4 +46,11 @@ test('missing document names both accepted input forms', () => {
 test('builds Python arguments with resolved CSV paths', () => {
   const args = buildAuditArgs('.', '/tmp/ads.csv', '/tmp/working.csv', ['--no-webhook']);
   assert.deepEqual(args, ['scripts/run_audit.py', '--project', '.', '--ads-script', '/tmp/ads.csv', '--working-file', '/tmp/working.csv', '--no-webhook']);
+});
+
+test('help distinguishes disabling Discord from local-only delivery', () => {
+  const help = helpText();
+  assert.match(help, /--no-webhook\s+Disable Discord delivery/);
+  assert.match(help, /--no-sheet\s+Disable Google Sheet delivery/);
+  assert.doesNotMatch(help, /--no-webhook\s+Write local reports only/);
 });

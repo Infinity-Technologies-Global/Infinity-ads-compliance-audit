@@ -69,9 +69,9 @@ ads compliance check करो")। `/` या `$` लिखना सिर्�
 अगर दोनों CSV files पहले से project में हैं, तो Documents वाला हिस्सा हटा
 दीजिए — वे अपने आप मिल जाती हैं।
 
-Agent bundled auditor चलाता है, बनी हुई reports पढ़ता है, हर finding को code से
-मिलाकर देखता है, और sanitized report Discord पर भेज देता है — जब तक आप
-local-only run न माँगें।
+Agent bundled auditor चलाता है, बनी हुई local reports पढ़ता है और हर finding को
+code से मिलाकर देखता है। Discord या spreadsheet delivery वैकल्पिक है और केवल
+स्पष्ट configuration पर चलती है।
 
 ### दो documents
 
@@ -161,7 +161,7 @@ Discovery उम्मीदवारों के बीच भी अंदा
 `AdsManager` में मौजूद तो हैं, पर आधार परियोजना में किसी स्क्रीन से जुड़े नहीं हैं, इसलिए
 इनका यहाँ आना अपेक्षित है।
 
-## Discord वेबहुक
+## वैकल्पिक Discord वेबहुक
 
 हर जाँच के लिए एक छोटा संदेश भेजा जाता है, कोई संलग्नक नहीं:
 
@@ -183,7 +183,7 @@ Discord भेजना केवल स्पष्ट कॉन्फ़िग
 इस्तेमाल करें। इनके बिना auditor केवल स्थानीय रिपोर्ट रखता है। पर्यावरण से मिले
 कॉन्फ़िगरेशन को अनदेखा करने के लिए `--no-webhook` इस्तेमाल करें।
 
-## जाँच की स्प्रेडशीट
+## वैकल्पिक जाँच की स्प्रेडशीट
 
 हर जाँच एक पंक्ति जोड़ती है:
 
@@ -210,8 +210,9 @@ export ADS_AUDIT_SHEET_TOKEN=<Apps Script में कॉन्फ़िगर 
 CI या debugging के लिए उपयोगी; ऊपर बताया गया AI वाला रास्ता ही असल तरीक़ा है।
 
 ```bash
-python3 scripts/run_audit.py --project /path/to/app --no-webhook
+python3 scripts/run_audit.py --project /path/to/app --no-webhook --no-sheet
 python3 scripts/run_audit.py --project . \
+  --no-webhook --no-sheet \
   --ads-script "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "./working file.csv"
 ```

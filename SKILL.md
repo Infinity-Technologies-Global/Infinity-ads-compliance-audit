@@ -1,6 +1,6 @@
 ---
 name: infinity-ads-compliance-audit
-description: Use when auditing an Android partner app's Infinity ads integration against the base project and the app's own ADS SCRIPTS and working checklist, including AdMob IDs, package/tokens, Remote Config, Application init order, preload/load/show flow, Activity-vs-Fragment screen structure, or webhook-ready compliance reports. Accepts local CSVs or Google Sheets/Docs links.
+description: Use when auditing an Android partner app's Infinity ads integration against the base project and the app's own ADS SCRIPTS and working checklist, including AdMob IDs, package/tokens, Remote Config, Application init order, preload/load/show flow, Activity-vs-Fragment screen structure, or local compliance reports. Accepts local CSVs or Google Sheets/Docs links.
 ---
 
 # Infinity Ads Compliance Audit
@@ -71,8 +71,13 @@ Run it yourself from the app root. Do not ask the partner to type commands.
 
 ```bash
 python3 "/absolute/path/to/this-skill/scripts/run_audit.py" --project . \
-  --base-project /home/infinity01/StudioProjects/TestSill
+  --no-webhook --no-sheet
 ```
+
+This uses the bundled base rules and its 24 placement keys, so a separate base
+checkout is not required. When an up-to-date Infinity base checkout is
+available, add `--base-project /path/to/base`; never use a machine-specific
+path from this skill.
 
 Both documents are auto-discovered from CSV files in the project. Pass them
 explicitly when discovery finds zero or several candidates, or when the partner
@@ -80,6 +85,7 @@ gives you links:
 
 ```bash
 python3 "/absolute/path/to/this-skill/scripts/run_audit.py" --project . \
+  --no-webhook --no-sheet \
   --ads-script   "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "https://docs.google.com/document/d/<id>/edit"
 ```
@@ -196,41 +202,13 @@ Failures outside the five areas — Welcome/Resume, Banner, service tokens,
 Firebase, direct SDK calls — are summarised in a single Note line. They still set
 the exit code to `2`.
 
-Three outputs:
+Two local outputs are always created:
 
 - `ads-audit-output/ads-audit-summary.md` — the five-area table plus each failure.
 - `ads-audit-output/ads-audit-findings.json` — every finding, for deep debugging.
-- One Discord message, and one row appended to the audit spreadsheet.
 
-### Discord
-
-```
-🚨 Ads Audit — My App
-`com.example.app`
-
-Init       → Done
-Splash     → Done
-Language   → Error: thiếu removeObservers
-Onboarding → Done
-Config     → Error: thiếu 3 key
-
-Khác: banner chưa dùng BaseActivityWithBanner
-```
-
-Discord delivery is opt-in: provide `--webhook-url`, `ADS_AUDIT_WEBHOOK_URL`,
-or `DISCORD_WEBHOOK_URL`. Without one, the audit keeps only the local reports.
-Disable an inherited environment configuration with `--no-webhook`.
-
-### Audit spreadsheet
-
-One row per audit: `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`.
-
-The endpoint is embedded; the shared secret is not. In Apps Script, open
-**Project Settings > Script Properties** and add the required
-`ADS_AUDIT_SHEET_TOKEN` property. Give the auditor the same value through
-`ADS_AUDIT_SHEET_TOKEN` or `--sheet-token`; otherwise the push is skipped with
-a note on stderr. Disable with `--no-sheet`. `templates/apps-script-sheet.gs`
-is the receiving script and rejects every request when the property is absent.
+This audit is local-first. Do not configure, enable, or diagnose Discord or
+spreadsheet delivery unless the partner explicitly requests data delivery.
 
 ## Partner-facing result format
 
