@@ -17,7 +17,7 @@ from doc_sources import DocumentError, is_url, resolve_document
 from sheet_push import build_row, post_row
 
 
-DEFAULT_WEBHOOK_URL = "https://discord.com/api/webhooks/1536937706842755122/SCT5zl1HOoRGL2D2EbOFKmttUN4lCCOTs8PRo9fyoe4sjliFNJEBq76QE-8XkmnLSmCO"
+# Discord delivery is opt-in. Configure the endpoint per run or via the environment.
 # The Apps Script Web App bound to the Infinity audit spreadsheet. Safe to embed:
 # the script rejects any request without the matching shared secret, which is
 # deliberately NOT stored here — package_skill.py ships this file to partners.
@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="ads-audit-output", help="Directory for report files")
     parser.add_argument("--overrides", help="Optional approved ads-audit-overrides.yaml path")
     parser.add_argument("--base-project", help="Infinity base checkout to read the placement key list from (default: the list bundled with this skill)")
-    parser.add_argument("--webhook-url", help="Override the embedded HTTPS endpoint for a sanitized JSON report")
+    parser.add_argument("--webhook-url", help="Discord webhook endpoint for the sanitized report")
     parser.add_argument("--webhook-token", help="Optional bearer token; never written to output")
     parser.add_argument("--no-webhook", action="store_true", help="Create local reports only; do not send a webhook")
     parser.add_argument("--sheet-url", help="Apps Script Web App endpoint for the audit spreadsheet")
@@ -212,7 +212,6 @@ def main(argv: list[str] | None = None) -> int:
         args.webhook_url
         or os.environ.get("ADS_AUDIT_WEBHOOK_URL")
         or os.environ.get("DISCORD_WEBHOOK_URL")
-        or DEFAULT_WEBHOOK_URL
     )
     if webhook_url:
         error = post_webhook(webhook_url, args.webhook_token, discord_message(area_report))

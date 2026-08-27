@@ -177,8 +177,10 @@ Config     → Error: thiếu 3 key
 Khác: banner chưa dùng BaseActivityWithBanner
 ```
 
-Disable per-run with `--no-webhook`. Override the endpoint with `--webhook-url`
-or the `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables.
+Discord delivery is opt-in. Configure the endpoint with `--webhook-url` or the
+`ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables. Without
+one, the audit keeps only the local reports. Use `--no-webhook` to ignore an
+inherited environment configuration.
 
 ## Audit spreadsheet
 
@@ -191,7 +193,9 @@ The rows arrive through a Google Apps Script Web App bound to the spreadsheet;
 
 The endpoint is embedded in the skill. **The shared secret is not** — this skill
 gets packaged into partner repositories, so the secret would travel with it. Set
-it yourself:
+it yourself. In Apps Script, open **Project Settings > Script Properties** and
+add the required `ADS_AUDIT_SHEET_TOKEN` property. Then give the auditor the
+same value:
 
 ```bash
 export ADS_AUDIT_SHEET_TOKEN=<the secret configured in the Apps Script>

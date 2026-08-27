@@ -680,13 +680,24 @@ def _check_equal(report: AuditReport, rule_id: str, category: str, expected: str
         report.findings.append(Finding.fail(rule_id, category, display_expected, display_observed, recommendation, location))
 
 
+def _release_config_path(root: Path, config_name: str = "ad_config.json") -> Path | None:
+    """Resolve one release config path consistently for every config check."""
+    canonical = root / "app" / "src" / "main" / "assets" / config_name
+    if canonical.is_file():
+        return canonical
+    candidates = sorted(
+        (path for path in _files(root, {".json"}) if path.name == config_name),
+        key=lambda path: (len(path.relative_to(root).parts), str(path.relative_to(root))),
+    )
+    return candidates[0] if candidates else None
+
+
 def _check_config(report: AuditReport, root: Path, contract: AuditContract, config_name: str, label: str) -> None:
-    candidates = [path for path in _files(root, {".json"}) if path.name == config_name]
-    if not candidates:
+    config_path = _release_config_path(root, config_name)
+    if config_path is None:
         for placement in contract.placements.values():
             report.findings.append(Finding.fail(f"AD_CONFIG_{label}:{placement.name}", "ad_config", placement.ad_unit_id, "config file missing", f"Add `{config_name}` with `{placement.name}` and its contract ad unit ID."))
         return
-    config_path = candidates[0]
     config = _config_data(config_path)
     if config is None:
         report.findings.append(Finding.fail(f"AD_CONFIG_{label}:FILE", "ad_config", "valid JSON", "invalid JSON", f"Fix JSON syntax in `{config_path.name}`.", str(config_path.relative_to(root))))
@@ -1267,16 +1278,13 @@ def _check_ads_manager_base_rules(report: AuditReport, root: Path, manager_paths
 
 def _release_config_keys(root: Path) -> tuple[set[str], str | None] | None:
     """Return the release config's placement keys and its location, or None."""
-    candidates = sorted(
-        (path for path in _files(root, {".json"}) if path.name == "ad_config.json"),
-        key=lambda path: (len(path.relative_to(root).parts), str(path)),
-    )
-    if not candidates:
+    config_path = _release_config_path(root)
+    if config_path is None:
         return None
-    config = _config_data(candidates[0])
+    config = _config_data(config_path)
     if config is None:
         return None
-    return set(config), str(candidates[0].relative_to(root))
+    return set(config), str(config_path.relative_to(root))
 
 
 def _check_base_key_coverage(report: AuditReport, root: Path, base_keys: tuple[str, ...]) -> None:

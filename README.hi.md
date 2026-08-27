@@ -178,9 +178,10 @@ Config     → Error: thiếu 3 key
 Khác: banner chưa dùng BaseActivityWithBanner
 ```
 
-एक बार चलाने के लिए `--no-webhook` से बंद कीजिए। अंत बिंदु बदलने के लिए
+Discord भेजना केवल स्पष्ट कॉन्फ़िगरेशन पर चालू होता है। अंत बिंदु के लिए
 `--webhook-url` या `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` पर्यावरण चर
-इस्तेमाल करें।
+इस्तेमाल करें। इनके बिना auditor केवल स्थानीय रिपोर्ट रखता है। पर्यावरण से मिले
+कॉन्फ़िगरेशन को अनदेखा करने के लिए `--no-webhook` इस्तेमाल करें।
 
 ## जाँच की स्प्रेडशीट
 
@@ -192,8 +193,9 @@ Khác: banner chưa dùng BaseActivityWithBanner
 `templates/apps-script-sheet.gs` उसमें चिपकाई जाने वाली स्क्रिप्ट है।
 
 अंत बिंदु कौशल में अंतर्निहित है। **साझा गुप्त मान नहीं है** — यह कौशल साझेदार
-रिपॉज़िटरी में पैक किया जाता है, इसलिए गुप्त मान भी साथ चला जाएगा। इसे खुद
-निर्धारित कीजिए:
+रिपॉज़िटरी में पैक किया जाता है, इसलिए गुप्त मान भी साथ चला जाएगा। Apps Script में
+**Project Settings > Script Properties** खोलकर आवश्यक
+`ADS_AUDIT_SHEET_TOKEN` property जोड़ें। फिर auditor को वही मान दें:
 
 ```bash
 export ADS_AUDIT_SHEET_TOKEN=<Apps Script में कॉन्फ़िगर किया हुआ गुप्त मान>

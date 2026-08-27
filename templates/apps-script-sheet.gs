@@ -8,8 +8,8 @@
  * Setup:
  *   1. Open the spreadsheet, then Extensions > Apps Script.
  *   2. Replace the contents of Code.gs with this file and save.
- *   3. Set SHARED_SECRET below to a value of your choosing, or leave it empty
- *      to accept any request that reaches the URL.
+ *   3. Open Project Settings > Script Properties, add the property
+ *      ADS_AUDIT_SHEET_TOKEN, and set it to a strong shared secret.
  *   4. Deploy > New deployment > Web app.
  *        Execute as:        Me
  *        Who has access:    Anyone
@@ -23,13 +23,8 @@
 /** Tab the rows are appended to. Created automatically when missing. */
 var SHEET_NAME = 'Audit Log';
 
-/**
- * Optional shared secret. When set, a request must carry the same value in its
- * `token` field or it is rejected. The Web App URL is unguessable but not
- * private — anyone who obtains it can append rows — so set this when the sheet
- * matters.
- */
-var SHARED_SECRET = '';
+/** Required Script Property containing the receiver's shared secret. */
+var SHARED_SECRET_PROPERTY = 'ADS_AUDIT_SHEET_TOKEN';
 
 var HEADERS = [
   'STT',
@@ -47,8 +42,11 @@ var HEADERS = [
 function doPost(request) {
   try {
     var payload = JSON.parse(request.postData.contents);
+    var sharedSecret = PropertiesService
+      .getScriptProperties()
+      .getProperty(SHARED_SECRET_PROPERTY);
 
-    if (SHARED_SECRET && payload.token !== SHARED_SECRET) {
+    if (!sharedSecret || payload.token !== sharedSecret) {
       return respond({ ok: false, error: 'unauthorized' });
     }
 

@@ -182,7 +182,7 @@ def _join_capped(phrases: Iterable[str], limit: int) -> str:
     for phrase in unique:
         candidate = phrase if not joined else f"{joined}; {phrase}"
         if len(candidate) > limit:
-            return f"{joined}…" if joined else phrase[: limit - 1] + "…"
+            return (joined or phrase)[: limit - 1] + "…"
         joined = candidate
     return joined
 

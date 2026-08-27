@@ -217,17 +217,20 @@ Config     → Error: thiếu 3 key
 Khác: banner chưa dùng BaseActivityWithBanner
 ```
 
-Disable with `--no-webhook`. Override with `--webhook-url` or
-`ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`.
+Discord delivery is opt-in: provide `--webhook-url`, `ADS_AUDIT_WEBHOOK_URL`,
+or `DISCORD_WEBHOOK_URL`. Without one, the audit keeps only the local reports.
+Disable an inherited environment configuration with `--no-webhook`.
 
 ### Audit spreadsheet
 
 One row per audit: `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`.
 
-The endpoint is embedded; the shared secret is not. Set `ADS_AUDIT_SHEET_TOKEN`
-or pass `--sheet-token`, otherwise the push is skipped with a note on stderr.
-Disable with `--no-sheet`. `templates/apps-script-sheet.gs` is the receiving
-script.
+The endpoint is embedded; the shared secret is not. In Apps Script, open
+**Project Settings > Script Properties** and add the required
+`ADS_AUDIT_SHEET_TOKEN` property. Give the auditor the same value through
+`ADS_AUDIT_SHEET_TOKEN` or `--sheet-token`; otherwise the push is skipped with
+a note on stderr. Disable with `--no-sheet`. `templates/apps-script-sheet.gs`
+is the receiving script and rejects every request when the property is absent.
 
 ## Partner-facing result format
 

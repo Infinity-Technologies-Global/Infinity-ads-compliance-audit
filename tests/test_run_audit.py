@@ -1,5 +1,6 @@
 import json
 import io
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -533,6 +534,35 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("BASE_KEY_COVERAGE").status, "FAIL")
 
+    def test_release_checks_share_the_canonical_config_with_multiple_candidates(self):
+        self.write_project()
+        decoys = (
+            self.root / "ad_config.json",
+            self.root / "vendor/sample/app/src/main/assets/ad_config.json",
+        )
+        for decoy in decoys:
+            decoy.parent.mkdir(parents=True, exist_ok=True)
+            decoy.write_text(
+                json.dumps({"sample_only": {"id": "wrong", "isEnable": True}}),
+                encoding="utf-8",
+            )
+        base = self.make_base_project(["inter_splash", "native_home"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        release = report.finding("AD_CONFIG_RELEASE:native_home")
+        coverage = report.finding("BASE_KEY_COVERAGE")
+        self.assertEqual(release.status, "PASS")
+        self.assertIn("app/src/main/assets/ad_config.json", release.location)
+        self.assertEqual(coverage.status, "PASS")
+        self.assertEqual(coverage.location, "app/src/main/assets/ad_config.json")
+        self.assertFalse(any(f.rule_id == "BASE_KEY_EXTRA" for f in report.findings))
+
     def test_parses_contract_and_project_checklist(self):
         contract = parse_ads_script(self.ads_csv)
         checklist = parse_working_file(self.working_csv)
@@ -889,22 +919,37 @@ class AdsAuditTest(unittest.TestCase):
     def test_cli_posts_one_message_without_an_attachment(self):
         self.write_project()
         output_dir = self.root / "audit-output"
+        webhook_url = "https://custom-discord.example/webhook"
         with patch.object(run_audit, "post_webhook", return_value=None) as post:
             result = run_audit.main([
                 "--project", str(self.root),
                 "--ads-script", str(self.ads_csv),
                 "--working-file", str(self.working_csv),
                 "--output-dir", str(output_dir),
+                "--webhook-url", webhook_url,
             ])
 
         self.assertEqual(result, 2)
         self.assertEqual(post.call_count, 1)
-        self.assertEqual(post.call_args.args[0], run_audit.DEFAULT_WEBHOOK_URL)
+        self.assertEqual(post.call_args.args[0], webhook_url)
         content = post.call_args.args[2]["content"]
         self.assertIn("Demo Player", content)
         self.assertIn("com.example.player", content)
         self.assertNotIn("adjust-secret", content)
         self.assertIsNone(post.call_args.kwargs.get("attachment_path"))
+
+    def test_cli_does_not_post_without_an_explicit_webhook_configuration(self):
+        self.write_project()
+        with patch.dict("os.environ", {}, clear=True), \
+             patch.object(run_audit, "post_webhook", return_value=None) as post:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        post.assert_not_called()
 
     def test_cli_does_not_post_when_no_webhook_is_requested(self):
         self.write_project()
@@ -1415,6 +1460,20 @@ class SheetPushTest(unittest.TestCase):
 
         self.assertIn("unauthorized", result)
 
+    def test_non_object_json_replies_return_one_sanitized_error(self):
+        malformed_replies = (b"[]", b"null", b'"text"', b"42", b"true", b"false")
+
+        for reply in malformed_replies:
+            with self.subTest(reply=reply):
+                with patch.object(
+                    sheet_push.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, reply, b""),
+                ):
+                    result = sheet_push._read_reply("https://example.test/result", 30)
+
+                self.assertEqual(result, "Apps Script reply was not a JSON object")
+
     def test_post_row_does_not_echo_token_or_endpoint_from_a_rejection(self):
         url = "https://script.google.com/macros/s/SECRET-ID/exec"
         posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
@@ -1448,6 +1507,47 @@ class SheetPushTest(unittest.TestCase):
             self.assertEqual(sheet_push.post_row("https://x/exec", {}), "curl is not installed")
         with patch.object(sheet_push.subprocess, "run", side_effect=subprocess.TimeoutExpired("curl", 30)):
             self.assertEqual(sheet_push.post_row("https://x/exec", {}), "curl timed out")
+
+    @unittest.skipUnless(shutil.which("node"), "node is required to execute the Apps Script template")
+    def test_apps_script_receiver_rejects_requests_when_script_property_is_missing(self):
+        template = Path(__file__).resolve().parents[1] / "templates/apps-script-sheet.gs"
+        harness = r"""
+const fs = require('fs');
+const source = fs.readFileSync(0, 'utf8');
+let sheetAccesses = 0;
+global.PropertiesService = {
+  getScriptProperties() {
+    return { getProperty() { return null; } };
+  },
+};
+global.ContentService = {
+  MimeType: { JSON: 'json' },
+  createTextOutput(text) {
+    return { text, setMimeType() { return this; } };
+  },
+};
+global.SpreadsheetApp = {
+  getActiveSpreadsheet() {
+    sheetAccesses += 1;
+    throw new Error('sheet must not be accessed without a configured secret');
+  },
+};
+eval(source);
+const response = doPost({ postData: { contents: JSON.stringify({ token: '' }) } });
+process.stdout.write(JSON.stringify({ body: JSON.parse(response.text), sheetAccesses }));
+"""
+
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness],
+            input=template.read_text(encoding="utf-8"),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result, {"body": {"ok": False, "error": "unauthorized"}, "sheetAccesses": 0})
 
 
 class AreaRollupTest(unittest.TestCase):
@@ -1511,6 +1611,18 @@ class AreaRollupTest(unittest.TestCase):
 
         self.assertLessEqual(len(report.note), 200)
         self.assertTrue(report.note.endswith("…"))
+
+    def test_reason_cap_includes_the_ellipsis_at_exactly_120_characters(self):
+        capped = area_rollup._join_capped(["r" * 120, "overflow"], 120)
+
+        self.assertEqual(len(capped), 120)
+        self.assertEqual(capped, "r" * 119 + "…")
+
+    def test_note_cap_includes_the_ellipsis_at_exactly_200_characters(self):
+        capped = area_rollup._join_capped(["n" * 200, "overflow"], 200)
+
+        self.assertEqual(len(capped), 200)
+        self.assertEqual(capped, "n" * 199 + "…")
 
     def test_reason_is_capped_at_120_characters(self):
         findings = [

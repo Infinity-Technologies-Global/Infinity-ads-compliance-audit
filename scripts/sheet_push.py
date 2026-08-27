@@ -95,6 +95,8 @@ def _read_reply(location: str, timeout: int) -> str | None:
         parsed = json.loads(completed.stdout.decode("utf-8", errors="replace").strip())
     except json.JSONDecodeError:
         return "Apps Script reply was not JSON"
+    if not isinstance(parsed, dict):
+        return "Apps Script reply was not a JSON object"
     if parsed.get("ok") is True:
         return None
     if parsed.get("error") == "unauthorized":

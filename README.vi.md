@@ -173,8 +173,10 @@ Config     → Error: thiếu 3 key
 Khác: banner chưa dùng BaseActivityWithBanner
 ```
 
-Tắt cho một lần chạy bằng `--no-webhook`. Đổi điểm cuối bằng `--webhook-url` hoặc
-biến môi trường `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`.
+Việc gửi Discord chỉ được bật khi cấu hình rõ ràng. Đặt điểm cuối bằng
+`--webhook-url` hoặc biến môi trường `ADS_AUDIT_WEBHOOK_URL` /
+`DISCORD_WEBHOOK_URL`. Nếu không có, auditor chỉ giữ báo cáo cục bộ. Dùng
+`--no-webhook` để bỏ qua cấu hình được kế thừa từ môi trường.
 
 ## Bảng tính kiểm tra
 
@@ -186,7 +188,9 @@ Các hàng được gửi đến Google Apps Script Web App gắn với bảng t
 `templates/apps-script-sheet.gs` là tập lệnh cần dán vào đó.
 
 Điểm cuối được nhúng trong bộ kỹ năng. **Bí mật dùng chung thì không** — bộ kỹ năng
-này được đóng gói vào kho lưu trữ của đối tác, nên bí mật sẽ đi theo. Hãy tự đặt:
+này được đóng gói vào kho lưu trữ của đối tác, nên bí mật sẽ đi theo. Trong Apps
+Script, mở **Cài đặt dự án > Thuộc tính tập lệnh** và thêm thuộc tính bắt buộc
+`ADS_AUDIT_SHEET_TOKEN`. Sau đó cung cấp cùng giá trị cho auditor:
 
 ```bash
 export ADS_AUDIT_SHEET_TOKEN=<bí mật đã cấu hình trong Apps Script>
