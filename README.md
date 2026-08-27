@@ -117,41 +117,36 @@ matches both drop to tier 2 rather than picking one.
 
 ## What gets checked
 
-Calibrated against the Infinity base project so that a correct app passes
-cleanly.
+The report covers five areas of the ads journey. Each is `Done` or `Error`.
 
-- **Identity** — package, app name (from default `res/values/strings.xml`, not a
-  translation), AdMob app id from the **release** `manifestPlaceholders`,
-  Firebase project, service tokens.
-- **Config** — every contract key/ID exists in release `ad_config.json`, matches
-  exactly, and declares `isEnable`. `ad_config_debug.json` is deliberately
-  exempt.
-- **Init order** — `MobileAds.initialize` → `DevConfig.init` →
-  `AdRemoteConfig.initializeFromAssets` → `ERainAd.init`, plus the DevConfig
-  version fields, `ERainAdConfig` fields, `intervalInterstitialAd`, AppOpen
-  exclusions, lifecycle observer and activity callbacks.
-- **Screen structure** — Splash, Language, Onboarding, Home and Welcome must be
-  separate Activities. A single-Activity + Fragment implementation of those
-  screens is an error. Fragments used as *pages inside* them are correct.
-- **Preload / load / show** — where each ad is preloaded, the four load gates
-  (`isEnable`, purchase, network, `getShouldDisplay*(config.enableUaCheck)`),
-  null-fallback hiding, and interstitials navigating only from their callback.
-- **Resume vs Welcome** — mode selection, disabled-screen lists, and the gates
-  that stop an App Open ad stacking with a Welcome interstitial.
-- **Banner** — config/purchase/container gates and `reloadIntervalSeconds`.
+| Area | Covers |
+| --- | --- |
+| **Init** | `GlobalApp` init order, DevConfig version fields, `ERainAdConfig` fields, AppOpen exclusions, the 35-second interstitial interval, lifecycle observer registration |
+| **Splash** | RemoteConfig load and apply, `inter_splash`, `banner_splash`, `open_resume`, and the native-language preload from the splash interstitial's `onAdLoaded` |
+| **Language** | DevSetting on the title, native click load, onboarding page-1 preload, the `removeObservers` swap between the two native observers, render and hide-on-null |
+| **Onboarding** | Preload of native page 4, native full and `inter_onboarding`, page LiveData mapping, `viewLifecycleOwner` observation, and the interstitial before Home |
+| **Config** | Release `ad_config.json` keys and IDs against ADS SCRIPTS, the AdMob app id from the **release** `manifestPlaceholders`, and coverage against the base's own 24 keys |
 
-Unmapped placements stay `NEEDS_MAPPING`. Claims static analysis cannot settle
-stay `NEEDS_RUNTIME_PROOF` with a test case attached. Neither is a pass.
+An area turns `Error` only when a check outright fails. `NEEDS_MAPPING` and
+`NEEDS_RUNTIME_PROOF` never turn an area red — they mean static analysis could
+not settle the claim, not that the app is wrong.
+
+Everything else the audit still checks — Welcome/Resume, Banner, service tokens,
+Firebase, app name and package, direct SDK calls — is summarised in one Note
+line. Those failures still set the exit code to `2`.
+
+Pass `--base-project /path/to/base` to read the 24 key list from a base checkout
+instead of the copy bundled with this skill.
 
 ## Output
 
 Written to `ads-audit-output/` inside the audited project:
 
-- `ads-audit-summary.md` — full finding list for developers.
-- `ads-audit-evidence.json` — sanitized Vietnamese MKT payload.
+- `ads-audit-summary.md` — the five-area table, then each failure with `file:line`.
+- `ads-audit-findings.json` — every finding, for deep debugging.
 
-The command exits `0` with no static failures, `2` when fixes are required, and
-`1` for invalid input.
+The command exits `0` with no failures, `2` when any check fails, and `1` for
+invalid input.
 
 Reports redact Adjust, Facebook client, and TikTok values. They never include
 `app-ads.txt` checks.
@@ -161,15 +156,54 @@ Reports redact Adjust, Facebook client, and TikTok values. They never include
 If a placement returns `NEEDS_MAPPING`, copy `templates/ads-audit-overrides.yaml`
 into the app and add the approved class and call mapping, keeping the contract
 key and ID exactly. Some placements — `native_home`, `native_permission`,
-`native_onboarding_fullscreen_*_4`, `banner_splash`, `reward_example` — exist in
+`native_onboarding_fullscreen_*_4`, `reward_example` — exist in
 `AdsManager` but are not wired to a screen in the base, so they land here by
 design.
 
 ## Discord webhook
 
-The skill posts a short MKT report plus the summary file after each audit.
-Disable per-run with `--no-webhook`. Override the endpoint with `--webhook-url`
-or the `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables.
+One short message per audit, no attachment:
+
+```
+🚨 Ads Audit — My App
+`com.example.app`
+
+Init       → Done
+Splash     → Done
+Language   → Error: thiếu removeObservers
+Onboarding → Done
+Config     → Error: thiếu 3 key
+
+Khác: banner chưa dùng BaseActivityWithBanner
+```
+
+Discord delivery is opt-in. Configure the endpoint with `--webhook-url` or the
+`ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables. Without
+one, the audit keeps only the local reports. Use `--no-webhook` to ignore an
+inherited environment configuration.
+
+## Audit spreadsheet
+
+Each audit appends one row:
+
+`STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
+
+The rows arrive through a Google Apps Script Web App bound to the spreadsheet;
+`templates/apps-script-sheet.gs` is the script to paste into it.
+
+The endpoint is embedded in the skill. **The shared secret is not** — this skill
+gets packaged into partner repositories, so the secret would travel with it. Set
+it yourself. In Apps Script, open **Project Settings > Script Properties** and
+add the required `ADS_AUDIT_SHEET_TOKEN` property. Then give the auditor the
+same value:
+
+```bash
+export ADS_AUDIT_SHEET_TOKEN=<the secret configured in the Apps Script>
+```
+
+Without it the push is skipped with a note on stderr and the audit still
+succeeds. Disable it outright with `--no-sheet`, or point somewhere else with
+`--sheet-url` / `ADS_AUDIT_SHEET_URL`.
 
 ## Running the auditor directly
 

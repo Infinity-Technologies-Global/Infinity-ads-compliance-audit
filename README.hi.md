@@ -117,61 +117,93 @@ Discovery उम्मीदवारों के बीच भी अंदा
 
 ## क्या-क्या जाँचा जाता है
 
-नियम Infinity base project के हिसाब से calibrate किए गए हैं, ताकि सही app साफ़
-तरीक़े से pass हो।
+रिपोर्ट विज्ञापन यात्रा के पाँच क्षेत्रों को कवर करती है। हर क्षेत्र `Done` या
+`Error` होता है।
 
-- **पहचान** — package, app name (default `res/values/strings.xml` से, किसी
-  translation से नहीं), **release** `manifestPlaceholders` से AdMob app id,
-  Firebase project, service tokens।
-- **Config** — contract की हर key/ID release `ad_config.json` में मौजूद हो,
-  बिलकुल मेल खाए, और `isEnable` घोषित करे। `ad_config_debug.json` को जान-बूझकर
-  छोड़ा जाता है।
-- **Init क्रम** — `MobileAds.initialize` → `DevConfig.init` →
-  `AdRemoteConfig.initializeFromAssets` → `ERainAd.init`, साथ में DevConfig के
-  version fields, `ERainAdConfig` fields, `intervalInterstitialAd`, AppOpen
-  exclusions, lifecycle observer और activity callbacks।
-- **Screen संरचना** — Splash, Language, Onboarding, Home और Welcome अलग-अलग
-  Activity होने चाहिए। इन screens को single-Activity + Fragment से बनाना ग़लती
-  है। इनके *अंदर pages* के रूप में इस्तेमाल हुए Fragments सही हैं।
-- **Preload / load / show** — हर ad कहाँ preload होता है, load के चार gates
-  (`isEnable`, purchase, network, `getShouldDisplay*(config.enableUaCheck)`),
-  null मिलने पर container छिपाना, और interstitial का सिर्फ़ अपने callback से
-  navigate करना।
-- **Resume बनाम Welcome** — mode का चुनाव, disabled-screen सूचियाँ, और वे gates
-  जो App Open ad को Welcome interstitial के ऊपर चढ़ने से रोकते हैं।
-- **Banner** — config/purchase/container gates और `reloadIntervalSeconds`।
+| क्षेत्र | शामिल है |
+| --- | --- |
+| **Init** | `GlobalApp` का आरंभीकरण क्रम, DevConfig के संस्करण क्षेत्र, `ERainAdConfig` क्षेत्र, AppOpen बहिष्करण, 35 सेकंड का अंतरालीय विज्ञापन अंतराल और जीवनचक्र पर्यवेक्षक का पंजीकरण |
+| **Splash** | RemoteConfig को लोड और लागू करना, `inter_splash`, `banner_splash`, `open_resume`, और Splash अंतरालीय विज्ञापन के `onAdLoaded` से Language मूल विज्ञापन को पहले लोड करना |
+| **Language** | शीर्षक पर DevSetting, क्लिक पर मूल विज्ञापन को लोड करना, Onboarding पृष्ठ 1 को पहले लोड करना, दो मूल विज्ञापन पर्यवेक्षकों के बीच `removeObservers` बदलाव, और `null` पर दिखाना या छिपाना |
+| **Onboarding** | मूल विज्ञापन पृष्ठ 4, पूरे-पर्दे वाले मूल विज्ञापन और `inter_onboarding` को पहले लोड करना, पृष्ठ का LiveData मानचित्रण, `viewLifecycleOwner` से अवलोकन और Home से पहले अंतरालीय विज्ञापन |
+| **Config** | ADS SCRIPTS के विरुद्ध रिलीज़ `ad_config.json` की कुंजियाँ और IDs, **रिलीज़** `manifestPlaceholders` से AdMob ऐप पहचान, और आधार परियोजना की अपनी 24 कुंजियों का आवरण |
 
-बिना mapping वाले placements `NEEDS_MAPPING` पर रहते हैं। जो दावे static
-analysis तय नहीं कर सकती, वे test case के साथ `NEEDS_RUNTIME_PROOF` पर रहते
-हैं। इनमें से कोई भी pass नहीं है।
+कोई क्षेत्र केवल तभी `Error` बनता है जब कोई जाँच सीधे `FAIL` हो।
+`NEEDS_MAPPING` और `NEEDS_RUNTIME_PROOF` किसी क्षेत्र को लाल नहीं करते — उनका
+मतलब है कि स्थिर विश्लेषण दावे को तय नहीं कर सका, यह नहीं कि ऐप गलत है।
+
+बाकी जाँची जाने वाली बातें — Welcome/Resume, Banner, सेवा टोकन, Firebase,
+ऐप का नाम और पैकेज, सीधे SDK कॉल — एक Note पंक्ति में संक्षेपित होती हैं। वे
+त्रुटियाँ भी निकास कोड को `2` करती हैं।
+
+शामिल प्रति के बजाय आधार परियोजना की स्रोत प्रति से 24 कुंजियों की सूची पढ़ने के लिए
+`--base-project /path/to/base` दें।
 
 ## नतीजा
 
-जाँचे गए project के अंदर `ads-audit-output/` में लिखा जाता है:
+जाँचे गए परियोजना के अंदर `ads-audit-output/` में लिखा जाता है:
 
-- `ads-audit-summary.md` — developers के लिए पूरी finding सूची।
-- `ads-audit-evidence.json` — sanitized वियतनामी MKT payload।
+- `ads-audit-summary.md` — पाँच क्षेत्रों की तालिका, फिर `file:line` के साथ हर त्रुटि।
+- `ads-audit-findings.json` — गहरी जाँच के लिए हर निष्कर्ष।
 
-Command बिना static failure के `0`, सुधार ज़रूरी होने पर `2`, और ग़लत input पर
-`1` return करती है।
+कमांड में त्रुटि न होने पर `0`, किसी भी जाँच के विफल होने पर `2`, और अमान्य
+इनपुट पर `1` लौटता है।
 
-Reports में Adjust, Facebook client और TikTok की values छिपा दी जाती हैं।
-`app-ads.txt` की जाँच कभी शामिल नहीं होती।
+रिपोर्टें Adjust, Facebook के क्लाइंट मान और TikTok मान छिपाती हैं। इनमें
+`app-ads.txt` की जाँच कभी नहीं होती।
 
-## अपने placements
+## अपने विज्ञापन स्थान
 
-अगर कोई placement `NEEDS_MAPPING` लौटाए, तो `templates/ads-audit-overrides.yaml`
-को app में copy कीजिए और स्वीकृत class व call mapping जोड़िए — contract की key
-और ID बिलकुल वैसी ही रखिए। कुछ placements — `native_home`, `native_permission`,
-`native_onboarding_fullscreen_*_4`, `banner_splash`, `reward_example` —
-`AdsManager` में मौजूद तो हैं, पर base में किसी screen से जुड़े नहीं हैं, इसलिए
+अगर कोई विज्ञापन स्थान `NEEDS_MAPPING` लौटाए, तो `templates/ads-audit-overrides.yaml`
+को ऐप में प्रतिलिपि बनाइए और स्वीकृत वर्ग व कॉल मानचित्रण जोड़िए — अनुबंध की कुंजी
+और ID बिलकुल वैसी ही रखिए। कुछ विज्ञापन स्थान — `native_home`, `native_permission`,
+`native_onboarding_fullscreen_*_4`, `reward_example` —
+`AdsManager` में मौजूद तो हैं, पर आधार परियोजना में किसी स्क्रीन से जुड़े नहीं हैं, इसलिए
 इनका यहाँ आना अपेक्षित है।
 
-## Discord webhook
+## Discord वेबहुक
 
-हर audit के बाद skill एक छोटी MKT report और summary file भेजती है। किसी एक run
-के लिए `--no-webhook` से बंद कीजिए। Endpoint बदलने के लिए `--webhook-url` या
-`ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` environment variables।
+हर जाँच के लिए एक छोटा संदेश भेजा जाता है, कोई संलग्नक नहीं:
+
+```
+🚨 Ads Audit — My App
+`com.example.app`
+
+Init       → Done
+Splash     → Done
+Language   → Error: thiếu removeObservers
+Onboarding → Done
+Config     → Error: thiếu 3 key
+
+Khác: banner chưa dùng BaseActivityWithBanner
+```
+
+Discord भेजना केवल स्पष्ट कॉन्फ़िगरेशन पर चालू होता है। अंत बिंदु के लिए
+`--webhook-url` या `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` पर्यावरण चर
+इस्तेमाल करें। इनके बिना auditor केवल स्थानीय रिपोर्ट रखता है। पर्यावरण से मिले
+कॉन्फ़िगरेशन को अनदेखा करने के लिए `--no-webhook` इस्तेमाल करें।
+
+## जाँच की स्प्रेडशीट
+
+हर जाँच एक पंक्ति जोड़ती है:
+
+`STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
+
+पंक्तियाँ स्प्रेडशीट से बंधे Google Apps Script Web App तक पहुँचती हैं;
+`templates/apps-script-sheet.gs` उसमें चिपकाई जाने वाली स्क्रिप्ट है।
+
+अंत बिंदु कौशल में अंतर्निहित है। **साझा गुप्त मान नहीं है** — यह कौशल साझेदार
+रिपॉज़िटरी में पैक किया जाता है, इसलिए गुप्त मान भी साथ चला जाएगा। Apps Script में
+**Project Settings > Script Properties** खोलकर आवश्यक
+`ADS_AUDIT_SHEET_TOKEN` property जोड़ें। फिर auditor को वही मान दें:
+
+```bash
+export ADS_AUDIT_SHEET_TOKEN=<Apps Script में कॉन्फ़िगर किया हुआ गुप्त मान>
+```
+
+इसके बिना भेजना stderr पर एक टिप्पणी के साथ छोड़ा जाता है और जाँच फिर भी सफल
+होती है। पूरी तरह बंद करने के लिए `--no-sheet`, या दूसरी जगह भेजने के लिए
+`--sheet-url` / `ADS_AUDIT_SHEET_URL` इस्तेमाल करें।
 
 ## Auditor सीधे चलाना
 

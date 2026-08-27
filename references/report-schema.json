@@ -1,23 +1,45 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Infinity Ads Audit MKT Webhook Payload",
+  "title": "Infinity Ads Audit area report and sheet row",
   "type": "object",
-  "required": ["ket_qua", "ten_app", "package_name", "tong_quan", "loi", "can_xac_nhan"],
+  "required": ["app_name", "package_name", "audit_date", "areas", "note", "overall"],
   "properties": {
-    "ket_qua": {"enum": ["ĐẠT", "CẦN SỬA", "CẦN KỸ THUẬT XÁC NHẬN"]},
-    "ten_app": {"type": "string"},
+    "app_name": {"type": "string"},
     "package_name": {"type": "string"},
-    "tong_quan": {
-      "type": "object",
-      "required": ["loi_can_sua", "can_ky_thuat_xac_nhan", "muc_da_kiem_tra_dung"],
-      "properties": {
-        "loi_can_sua": {"type": "integer"},
-        "can_ky_thuat_xac_nhan": {"type": "integer"},
-        "muc_da_kiem_tra_dung": {"type": "integer"}
+    "audit_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "overall": {"enum": ["Done", "Error"]},
+    "note": {"type": "string", "maxLength": 200},
+    "areas": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "reason"],
+        "properties": {
+          "name": {"enum": ["Init", "Splash", "Language", "Onboarding", "Config"]},
+          "status": {"enum": ["Done", "Error"]},
+          "reason": {"type": "string", "maxLength": 120}
+        }
       }
-    },
-    "loi": {"type": "array", "items": {"type": "object"}},
-    "can_xac_nhan": {"type": "array", "items": {"type": "string"}},
-    "trang_thai_ky_thuat": {"enum": ["BLOCKED", "REVIEW_REQUIRED"]}
+    }
+  },
+  "$defs": {
+    "sheetRow": {
+      "type": "object",
+      "required": ["package", "app_name", "date", "init", "splash", "language", "onboarding", "config", "note"],
+      "properties": {
+        "token": {"type": "string", "description": "Apps Script shared secret; never stored in the repository"},
+        "package": {"type": "string"},
+        "app_name": {"type": "string"},
+        "date": {"type": "string"},
+        "init": {"enum": ["Done", "Error"]},
+        "splash": {"enum": ["Done", "Error"]},
+        "language": {"enum": ["Done", "Error"]},
+        "onboarding": {"enum": ["Done", "Error"]},
+        "config": {"enum": ["Done", "Error"]},
+        "note": {"type": "string"}
+      }
+    }
   }
 }

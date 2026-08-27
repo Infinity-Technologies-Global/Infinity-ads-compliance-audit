@@ -62,11 +62,15 @@ The auditor emits these base-flow rule ids in addition to app identity/config ch
 - `FLOW_SPLASH_OPEN_RESUME`
 - `FLOW_LANGUAGE_DEV_SETTING`
 - `FLOW_LANGUAGE_PRELOAD_AND_RENDER`
+- `FLOW_LANGUAGE_OBSERVER_SWAP`
 - `FLOW_ONBOARDING_PRELOAD_AND_SHOW`
 - `FLOW_ONBOARDING_PAGE_RENDERING`
+- `FLOW_ONBOARDING_PAGE_LIFECYCLE`
+- `FLOW_SPLASH_BANNER`
 - `FLOW_RESUME_RULE`
 - `FLOW_WELCOME_NATIVE_AND_INTER`
 - `FLOW_INTER_WELCOME_BACK_*`
+- `BASE_KEY_COVERAGE` / `BASE_KEY_EXTRA`
 
 ## Static-analysis limit
 
@@ -82,7 +86,12 @@ themselves as destinations in a single-Activity navigation graph.
 
 ## Optional placements
 
-`native_home`, `native_permission`, `native_onboarding_fullscreen_*_4`,
-`banner_splash`, and `reward_example` are provided by `AdsManager` in the base
-but are not wired to a screen there. When the contract lists one and no screen
-calls it, that is `NEEDS_MAPPING`, not a failure.
+`native_home`, `native_permission`, `native_onboarding_fullscreen_*_4`, and
+`reward_example` are provided by `AdsManager` in the base but are not wired to a
+screen there. When the contract lists one and no screen calls it, that is
+`NEEDS_MAPPING`, not a failure.
+
+`banner_splash` is different. The base defines it in `ad_config.json` but wires
+it to no screen, while partner apps do show a splash banner. When the contract
+lists `banner_splash` and `SplashActivity` never binds it, `FLOW_SPLASH_BANNER`
+reports `FAIL`.

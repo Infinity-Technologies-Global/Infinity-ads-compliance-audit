@@ -8,7 +8,15 @@ import zipfile
 from pathlib import Path
 
 
-EXCLUDED_DIRS = {"__pycache__", ".git", ".pytest_cache", "ads-audit-output"}
+EXCLUDED_DIRS = {
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    ".claude",
+    ".superpowers",
+    "ads-audit-output",
+    "docs",
+}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 
 

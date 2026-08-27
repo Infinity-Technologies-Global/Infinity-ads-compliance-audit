@@ -113,58 +113,92 @@ cùng lúc, đều rơi xuống tầng 2 chứ không tự chọn một cái.
 
 ## Kiểm tra những gì
 
-Bộ rule được hiệu chỉnh theo project base Infinity, để một app làm đúng sẽ đạt
-sạch.
+Báo cáo bao phủ năm khu vực của hành trình quảng cáo. Mỗi khu vực là `Done` hoặc
+`Error`.
 
-- **Định danh** — package, tên app (lấy từ `res/values/strings.xml` mặc định,
-  không lấy bản dịch), AdMob app id lấy từ `manifestPlaceholders` bản **release**,
-  Firebase project, các token dịch vụ.
-- **Config** — mọi key/ID trong hợp đồng phải có trong `ad_config.json` bản
-  release, khớp tuyệt đối và có `isEnable`. `ad_config_debug.json` được miễn trừ
-  có chủ đích.
-- **Thứ tự khởi tạo** — `MobileAds.initialize` → `DevConfig.init` →
-  `AdRemoteConfig.initializeFromAssets` → `ERainAd.init`, kèm các field version
-  của DevConfig, các field `ERainAdConfig`, `intervalInterstitialAd`, danh sách
-  chặn AppOpen, lifecycle observer và activity callbacks.
-- **Cấu trúc màn hình** — Splash, Language, Onboarding, Home, Welcome phải là
-  `Activity` riêng. Làm 5 màn này bằng Fragment trong một Activity duy nhất là
-  lỗi. Fragment dùng làm *trang bên trong* các màn đó là đúng base.
-- **Preload / load / show** — vị trí preload từng quảng cáo, đủ 4 gate khi load
-  (`isEnable`, đã mua VIP, mạng, `getShouldDisplay*(config.enableUaCheck)`),
-  hành vi ẩn container khi null, và inter chỉ chuyển màn từ callback.
-- **Resume và Welcome** — cách chọn chế độ, 2 danh sách màn bị chặn, và các gate
-  ngăn App Open chồng lên inter Welcome.
-- **Banner** — gate config/mua VIP/container và `reloadIntervalSeconds`.
+| Khu vực | Bao gồm |
+| --- | --- |
+| **Init** | Thứ tự khởi tạo `GlobalApp`, các trường phiên bản của DevConfig, các trường `ERainAdConfig`, danh sách loại trừ AppOpen, khoảng thời gian quảng cáo xen kẽ 35 giây, đăng ký bộ quan sát vòng đời |
+| **Splash** | Tải và áp dụng RemoteConfig, `inter_splash`, `banner_splash`, `open_resume`, và tải trước quảng cáo gốc của Language từ `onAdLoaded` của quảng cáo xen kẽ Splash |
+| **Language** | DevSetting trên tiêu đề, tải quảng cáo gốc khi nhấp, tải trước trang Onboarding 1, chuyển đổi bằng `removeObservers` giữa hai bộ quan sát quảng cáo gốc, hiển thị và ẩn khi `null` |
+| **Onboarding** | Tải trước quảng cáo gốc trang 4, quảng cáo gốc toàn màn hình và `inter_onboarding`, ánh xạ LiveData của trang, quan sát bằng `viewLifecycleOwner`, và quảng cáo xen kẽ trước Home |
+| **Config** | Khóa và ID `ad_config.json` bản phát hành so với ADS SCRIPTS, mã ứng dụng AdMob từ `manifestPlaceholders` bản **phát hành**, và mức bao phủ 24 khóa của dự án cơ sở |
 
-Vị trí chưa có mapping giữ trạng thái `NEEDS_MAPPING`. Điều static không chứng
-minh được giữ `NEEDS_RUNTIME_PROOF` kèm kịch bản test. Cả hai đều **không phải
-là đạt**.
+Một khu vực chỉ thành `Error` khi một kiểm tra thực sự `FAIL`. `NEEDS_MAPPING` và
+`NEEDS_RUNTIME_PROOF` không bao giờ làm khu vực đỏ — chúng chỉ có nghĩa phân tích
+tĩnh chưa thể kết luận, không phải ứng dụng sai.
+
+Mọi nội dung khác vẫn được kiểm tra — Welcome/Resume, Banner, mã thông báo dịch
+vụ, Firebase, tên ứng dụng và tên gói, lời gọi SDK trực tiếp — được tóm tắt trong
+một dòng Note. Các lỗi đó vẫn đặt mã thoát thành `2`.
+
+Truyền `--base-project /path/to/base` để đọc danh sách 24 khóa từ bản sao mã
+nguồn của dự án cơ sở thay vì bản sao đi kèm bộ kỹ năng này.
 
 ## Kết quả
 
-Ghi vào `ads-audit-output/` bên trong project được kiểm tra:
+Ghi vào `ads-audit-output/` bên trong dự án được kiểm tra:
 
-- `ads-audit-summary.md` — danh sách lỗi đầy đủ cho dev.
-- `ads-audit-evidence.json` — payload tiếng Việt cho MKT, đã lọc bí mật.
+- `ads-audit-summary.md` — bảng năm khu vực, sau đó là từng lỗi cùng `file:line`.
+- `ads-audit-findings.json` — mọi phát hiện, để gỡ lỗi chuyên sâu.
 
-Mã thoát: `0` khi không có lỗi tĩnh, `2` khi cần sửa, `1` khi đầu vào không hợp lệ.
+Lệnh trả về `0` khi không có lỗi, `2` khi bất kỳ kiểm tra nào lỗi, và `1` khi đầu
+vào không hợp lệ.
 
-Báo cáo luôn che giá trị Adjust, Facebook client và TikTok, và không kiểm tra
-`app-ads.txt`.
+Báo cáo che giá trị Adjust, mã ứng dụng khách Facebook và TikTok. Chúng không bao giờ gồm
+kiểm tra `app-ads.txt`.
 
 ## Vị trí quảng cáo riêng
 
-Nếu một vị trí trả về `NEEDS_MAPPING`, copy `templates/ads-audit-overrides.yaml`
-vào app rồi khai báo class và hàm gọi đã được duyệt, giữ nguyên key và ID trong
+Nếu một vị trí trả về `NEEDS_MAPPING`, sao chép `templates/ads-audit-overrides.yaml`
+vào ứng dụng rồi khai báo lớp và lời gọi đã được duyệt, giữ nguyên khóa và ID trong
 hợp đồng. Một số vị trí — `native_home`, `native_permission`,
-`native_onboarding_fullscreen_*_4`, `banner_splash`, `reward_example` — có sẵn
-trong `AdsManager` nhưng base không gắn vào màn nào, nên rơi vào đây là bình thường.
+`native_onboarding_fullscreen_*_4`, `reward_example` — có sẵn
+trong `AdsManager` nhưng dự án cơ sở không gắn vào màn nào, nên được xếp ở đây theo thiết kế.
 
-## Webhook Discord
+## Điểm nhận Discord
 
-Sau mỗi lần audit, skill gửi báo cáo ngắn cho MKT kèm file summary. Tắt cho một
-lần chạy bằng `--no-webhook`. Đổi endpoint bằng `--webhook-url` hoặc biến môi
-trường `ADS_AUDIT_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL`.
+Mỗi lần kiểm tra gửi một tin nhắn ngắn, không có tệp đính kèm:
+
+```
+🚨 Ads Audit — My App
+`com.example.app`
+
+Init       → Done
+Splash     → Done
+Language   → Error: thiếu removeObservers
+Onboarding → Done
+Config     → Error: thiếu 3 key
+
+Khác: banner chưa dùng BaseActivityWithBanner
+```
+
+Việc gửi Discord chỉ được bật khi cấu hình rõ ràng. Đặt điểm cuối bằng
+`--webhook-url` hoặc biến môi trường `ADS_AUDIT_WEBHOOK_URL` /
+`DISCORD_WEBHOOK_URL`. Nếu không có, auditor chỉ giữ báo cáo cục bộ. Dùng
+`--no-webhook` để bỏ qua cấu hình được kế thừa từ môi trường.
+
+## Bảng tính kiểm tra
+
+Mỗi lần kiểm tra thêm một hàng:
+
+`STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
+
+Các hàng được gửi đến Google Apps Script Web App gắn với bảng tính;
+`templates/apps-script-sheet.gs` là tập lệnh cần dán vào đó.
+
+Điểm cuối được nhúng trong bộ kỹ năng. **Bí mật dùng chung thì không** — bộ kỹ năng
+này được đóng gói vào kho lưu trữ của đối tác, nên bí mật sẽ đi theo. Trong Apps
+Script, mở **Cài đặt dự án > Thuộc tính tập lệnh** và thêm thuộc tính bắt buộc
+`ADS_AUDIT_SHEET_TOKEN`. Sau đó cung cấp cùng giá trị cho auditor:
+
+```bash
+export ADS_AUDIT_SHEET_TOKEN=<bí mật đã cấu hình trong Apps Script>
+```
+
+Không có bí mật, thao tác gửi bị bỏ qua với một ghi chú trên stderr và việc kiểm
+tra vẫn thành công. Tắt hẳn bằng `--no-sheet`, hoặc trỏ đến nơi khác với `--sheet-url` /
+`ADS_AUDIT_SHEET_URL`.
 
 ## Chạy auditor trực tiếp
 

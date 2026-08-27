@@ -1,5 +1,6 @@
 import json
 import io
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,15 +14,44 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from ads_audit_lib import (  # noqa: E402
     Finding,
-    build_webhook_payload,
     inspect_project,
     parse_ads_script,
     parse_working_file,
-    redact_value,
+    render_summary,
 )
+import ads_audit_lib  # noqa: E402
 import run_audit  # noqa: E402
 import doc_sources  # noqa: E402
 import package_skill  # noqa: E402
+import area_rollup  # noqa: E402
+import sheet_push  # noqa: E402
+
+
+class PackageSkillTest(unittest.TestCase):
+    def test_partner_package_excludes_internal_docs_and_workspace_metadata(self):
+        """Internal planning files must never become partner-package contents."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "skill"
+            (root / "docs" / "superpowers").mkdir(parents=True)
+            (root / ".superpowers" / "sdd").mkdir(parents=True)
+            (root / ".claude").mkdir()
+            (root / "scripts").mkdir()
+            (root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            (root / "README.md").write_text("# partner docs\n", encoding="utf-8")
+            (root / "scripts" / "run.py").write_text("print('audit')\n", encoding="utf-8")
+            (root / "docs" / "superpowers" / "internal.md").write_text("internal plan\n", encoding="utf-8")
+            (root / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
+            (root / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+
+            output = package_skill.package_skill(root, Path(directory) / "partner.zip")
+
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+
+        self.assertEqual(
+            names,
+            {"skill/SKILL.md", "skill/README.md", "skill/scripts/run.py"},
+        )
 
 
 class AdsAuditTest(unittest.TestCase):
@@ -161,7 +191,7 @@ class AdsAuditTest(unittest.TestCase):
             "fun loadNativeHome(a: Activity, r: Int){ val config = AdRemoteConfig.native_home; loadNativeInternal(a, config, r, nativeHomeAdLive, ERainAd.getInstance().getShouldDisplayNativeHome(config.enableUaCheck)) } "
             "fun loadNativeWelcome(a: Activity, r: Int){ loadNativeInternal(a, AdRemoteConfig.native_welcome, r, nativeWelcomeAdLive, ERainAd.getInstance().getShouldDisplayNativeWelcomeBack(AdRemoteConfig.native_welcome.enableUaCheck)) } "
             "fun loadInterOnboarding(context: Context, ignoreLimit: Boolean = false){ val config = AdRemoteConfig.inter_onboarding; if (!config.isEnable || AppPurchase.getInstance().isPurchased(context) || (!ignoreLimit && !ERainAd.getInstance().getShouldDisplayInterOnboarding(config.enableUaCheck))) { interOnboarding = null; return }; interOnboarding = ERainAd.getInstance().getInterstitialAds(context, config.id, object: AdCallback(){}) } "
-            "fun showInterOnboarding(context: Context, ignoreLimit: Boolean = false, onAction: () -> Unit){ val interstitial = interOnboarding; if (interstitial != null && interstitial.isReady && !AppPurchase.getInstance().isPurchased(context) && (ignoreLimit || ERainAd.getInstance().getShouldDisplayInterOnboarding(AdRemoteConfig.inter_onboarding.enableUaCheck))) { ERainAd.getInstance().forceShowInterstitial(context, interstitial, object: AdCallback(){ override fun onNextAction(){ onAction() } }, true) } else onAction() } "
+            "fun showInterOnboarding(context: Context, ignoreLimit: Boolean = false, onAction: () -> Unit){ val interstitial = interOnboarding; if (interstitial != null && interstitial.isReady && !AppPurchase.getInstance().isPurchased(context) && (ignoreLimit || ERainAd.getInstance().getShouldDisplayInterOnboarding(AdRemoteConfig.inter_onboarding.enableUaCheck))) { ERainAd.getInstance().forceShowInterstitial(context, interstitial, object: AdCallback(){ override fun onNextAction(){ onAction() } }, true) } else { onAction() } } "
             "fun loadInterWelcome(context: Context, ignoreLimit: Boolean = false){ val config = AdRemoteConfig.inter_welcome; if (!config.isEnable || AppPurchase.getInstance().isPurchased(context) || (!ignoreLimit && !ERainAd.getInstance().getShouldDisplayInterWelcomeBack(config.enableUaCheck))) { interWelcomeAd = null; return }; interWelcomeAd = ERainAd.getInstance().getInterstitialAds(context, config.id, object: AdCallback(){}) } "
             "fun showInterWelcome(context: Context, ignoreLimit: Boolean = false, onAction: () -> Unit){ val interstitial = interWelcomeAd; if (interstitial != null && interstitial.isReady && !AppPurchase.getInstance().isPurchased(context) && (ignoreLimit || ERainAd.getInstance().getShouldDisplayInterWelcomeBack(AdRemoteConfig.inter_welcome.enableUaCheck))) { ERainAd.getInstance().forceShowInterstitial(context, interstitial, object: AdCallback(){ override fun onNextAction(){ onAction() } }, false) } else onAction() } "
             "fun loadBanner(activity: AppCompatActivity, adUnitConfig: AdUnitConfig, frAds: FrameLayout, isCollapse: Boolean){ if(adUnitConfig.isEnable){ if(isCollapse) ERainAd.getInstance().loadCollapsibleBanner(activity, adUnitConfig.id, AppConstant.CollapsibleGravity.BOTTOM, object: AdCallback(){}) else ERainAd.getInstance().loadBanner(activity, adUnitConfig.id, object: AdCallback(){}) } else { frAds.removeAllViews(); frAds.goneView() } } }",
@@ -335,6 +365,231 @@ class AdsAuditTest(unittest.TestCase):
         report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
         self.assertEqual(report.finding("PLACEMENT_FLOW:banner_splash").status, "PASS")
 
+    def _add_banner_splash_to_contract(self):
+        self.ads_csv.write_text(
+            self.ads_csv.read_text(encoding="utf-8").replace(
+                ",,APP ID,ca-app-pub-123~999,\n",
+                "3,banner,banner_splash,ca-app-pub-123/444,Banner on splash\n"
+                ",,APP ID,ca-app-pub-123~999,\n",
+            ),
+            encoding="utf-8",
+        )
+
+    def test_splash_banner_is_silent_when_the_contract_omits_the_key(self):
+        self.write_full_base_flow_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertFalse(any(f.rule_id == "FLOW_SPLASH_BANNER" for f in report.findings))
+
+    def test_splash_banner_fails_when_the_contract_lists_it_but_splash_never_binds_it(self):
+        self.write_full_base_flow_project()
+        self._add_banner_splash_to_contract()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("FLOW_SPLASH_BANNER")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("banner_splash", finding.expected)
+
+    def test_splash_banner_passes_when_splash_binds_the_key(self):
+        self.write_full_base_flow_project()
+        self._add_banner_splash_to_contract()
+        splash = self.root / "app/src/main/java/com/example/SplashActivity.kt"
+        splash.write_text(
+            splash.read_text(encoding="utf-8").replace(
+                "fun onResume(){",
+                "val bannerConfig = BannerConfig(AdRemoteConfig.banner_splash, false); fun onResume(){",
+            ),
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(report.finding("FLOW_SPLASH_BANNER").status, "PASS")
+
+    def test_compliant_base_project_rolls_up_to_five_done_areas(self):
+        self.write_full_base_flow_project()
+        # The fixture ships two config keys; the coverage rule wants all 24.
+        config_path = self.root / "app/src/main/assets/ad_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        for key in ads_audit_lib.BASE_PLACEMENT_KEYS:
+            config.setdefault(key, {"id": f"ca-app-pub-123/{key}", "isEnable": True})
+        config["banner_splash"] = {"id": "ca-app-pub-123/444", "isEnable": True}
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        # banner_splash is in the contract, so Splash must bind it.
+        self._add_banner_splash_to_contract()
+        splash = self.root / "app/src/main/java/com/example/SplashActivity.kt"
+        splash.write_text(
+            splash.read_text(encoding="utf-8").replace(
+                "fun onResume(){",
+                "val bannerConfig = BannerConfig(AdRemoteConfig.banner_splash, false); fun onResume(){",
+            ),
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        rolled = area_rollup.area_rollup(report.findings, "Demo Player", "com.example.player", "2026-08-26")
+
+        errors = {area.name: area.reason for area in rolled.areas if area.status == "Error"}
+        self.assertEqual(errors, {})
+        self.assertEqual(rolled.overall, "Done")
+
+    def test_base_placement_keys_defaults_to_the_embedded_list(self):
+        keys = ads_audit_lib.base_placement_keys()
+
+        self.assertEqual(len(keys), 24)
+        self.assertIn("inter_splash", keys)
+        self.assertIn("reward_example", keys)
+
+    def make_base_project(self, keys):
+        """A base checkout outside the audited root, so project discovery cannot see it."""
+        base_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(base_dir.cleanup)
+        base = Path(base_dir.name).resolve()
+        assets = base / "app/src/main/assets"
+        assets.mkdir(parents=True)
+        (assets / "ad_config.json").write_text(
+            json.dumps({key: {"id": f"ca-app-pub-123/{key}", "isEnable": True} for key in keys}),
+            encoding="utf-8",
+        )
+        return base
+
+    def test_base_placement_keys_can_be_read_from_a_base_project(self):
+        base = self.make_base_project(["inter_splash", "banner_home"])
+
+        self.assertEqual(ads_audit_lib.base_placement_keys(base), ("inter_splash", "banner_home"))
+
+    def test_base_placement_keys_rejects_an_unreadable_base_project(self):
+        with self.assertRaises(ValueError) as caught:
+            ads_audit_lib.base_placement_keys(self.root / "no-such-base")
+
+        self.assertIn("ad_config.json", str(caught.exception))
+
+    def test_base_key_coverage_reports_missing_keys(self):
+        self.write_project()
+        base = self.make_base_project(["inter_splash", "native_home", "native_welcome"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        coverage = report.finding("BASE_KEY_COVERAGE")
+        self.assertEqual(coverage.status, "FAIL")
+        self.assertIn("native_welcome", coverage.observed)
+        self.assertNotIn("inter_splash", coverage.observed)
+        self.assertFalse(any(f.rule_id == "BASE_KEY_EXTRA" for f in report.findings))
+
+    def test_base_key_coverage_treats_extra_keys_as_needs_mapping_never_fail(self):
+        self.write_project()  # writes ad_config.json with inter_splash + native_home
+        base = self.make_base_project(["inter_splash"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        self.assertEqual(report.finding("BASE_KEY_COVERAGE").status, "PASS")
+        extra = report.finding("BASE_KEY_EXTRA")
+        self.assertEqual(extra.status, "NEEDS_MAPPING")
+        self.assertIn("native_home", extra.observed)
+        self.assertFalse(
+            any(f.rule_id == "BASE_KEY_EXTRA" and f.status == "FAIL" for f in report.findings)
+        )
+
+    def test_base_key_coverage_passes_cleanly_when_keys_match_exactly(self):
+        self.write_project()  # writes ad_config.json with inter_splash + native_home
+        base = self.make_base_project(["inter_splash", "native_home"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        self.assertEqual(report.finding("BASE_KEY_COVERAGE").status, "PASS")
+        self.assertFalse(any(f.rule_id == "BASE_KEY_EXTRA" for f in report.findings))
+
+    def test_base_key_coverage_fails_when_no_ad_config_file_exists(self):
+        bare = tempfile.TemporaryDirectory()
+        self.addCleanup(bare.cleanup)
+        root = Path(bare.name).resolve()
+
+        report = inspect_project(
+            root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+        )
+
+        coverage = report.finding("BASE_KEY_COVERAGE")
+        self.assertEqual(coverage.status, "FAIL")
+        self.assertIn("ad_config.json", coverage.observed)
+
+    def test_base_key_coverage_reports_missing_and_extra_keys_together(self):
+        self.write_project()  # writes ad_config.json with inter_splash + native_home
+        base = self.make_base_project(["inter_splash", "native_welcome"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        coverage = report.finding("BASE_KEY_COVERAGE")
+        self.assertEqual(coverage.status, "FAIL")
+        self.assertIn("native_welcome", coverage.observed)
+        extra = report.finding("BASE_KEY_EXTRA")
+        self.assertEqual(extra.status, "NEEDS_MAPPING")
+        self.assertIn("native_home", extra.observed)
+
+    def test_base_key_coverage_reads_the_audited_project_not_a_nested_checkout(self):
+        self.write_project()
+        # A stray nested copy must not be mistaken for the audited app's config.
+        nested = self.root / "vendor/sample/app/src/main/assets"
+        nested.mkdir(parents=True)
+        (nested / "ad_config.json").write_text(
+            json.dumps({key: {"id": "x", "isEnable": True} for key in ads_audit_lib.BASE_PLACEMENT_KEYS}),
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(report.finding("BASE_KEY_COVERAGE").status, "FAIL")
+
+    def test_release_checks_share_the_canonical_config_with_multiple_candidates(self):
+        self.write_project()
+        decoys = (
+            self.root / "ad_config.json",
+            self.root / "vendor/sample/app/src/main/assets/ad_config.json",
+        )
+        for decoy in decoys:
+            decoy.parent.mkdir(parents=True, exist_ok=True)
+            decoy.write_text(
+                json.dumps({"sample_only": {"id": "wrong", "isEnable": True}}),
+                encoding="utf-8",
+            )
+        base = self.make_base_project(["inter_splash", "native_home"])
+
+        report = inspect_project(
+            self.root,
+            parse_ads_script(self.ads_csv),
+            parse_working_file(self.working_csv),
+            base_project=base,
+        )
+
+        release = report.finding("AD_CONFIG_RELEASE:native_home")
+        coverage = report.finding("BASE_KEY_COVERAGE")
+        self.assertEqual(release.status, "PASS")
+        self.assertIn("app/src/main/assets/ad_config.json", release.location)
+        self.assertEqual(coverage.status, "PASS")
+        self.assertEqual(coverage.location, "app/src/main/assets/ad_config.json")
+        self.assertFalse(any(f.rule_id == "BASE_KEY_EXTRA" for f in report.findings))
+
     def test_parses_contract_and_project_checklist(self):
         contract = parse_ads_script(self.ads_csv)
         checklist = parse_working_file(self.working_csv)
@@ -453,17 +708,6 @@ class AdsAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Alpha.*Beta.*Gamma"):
             parse_working_file(working)
 
-    def test_redacts_secret_values_and_payload_never_contains_them(self):
-        redacted = redact_value("facebook-client-secret")
-        payload = build_webhook_payload(
-            project_name="Demo",
-            findings=[Finding.fail("TOKEN", "token", "facebook-client-secret", "missing", "fix")],
-        )
-
-        self.assertNotEqual(redacted, "facebook-client-secret")
-        self.assertNotIn("facebook-client-secret", json.dumps(payload))
-        self.assertEqual(payload["tong_quan"]["loi_can_sua"], 1)
-
     def test_passes_exact_identity_config_and_required_service_evidence(self):
         self.write_project()
         report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
@@ -514,23 +758,6 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("APP_NAME").status, "PASS")
 
-    def test_webhook_identity_error_includes_expected_and_observed_values(self):
-        checklist = parse_working_file(self.working_csv)
-        payload = build_webhook_payload(
-            "repo-folder",
-            checklist,
-            [
-                Finding.fail("APP_NAME", "identity", "Demo Player", "Actual Player", "fix"),
-                Finding.fail("APP_PACKAGE", "identity", "com.expected.player", "com.actual.player", "fix"),
-            ],
-        )
-
-        description = payload["loi"][0]["mo_ta"]
-        self.assertIn("expected `Demo Player`", description)
-        self.assertIn("observed `Actual Player`", description)
-        self.assertIn("expected `com.expected.player`", description)
-        self.assertIn("observed `com.actual.player`", description)
-
     def test_marks_unmapped_placement_location_without_claiming_pass(self):
         self.write_project()
         self.ads_csv.write_text(
@@ -545,7 +772,44 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("PLACEMENT_FLOW:inter_partner_feature").status, "NEEDS_MAPPING")
 
-    def test_cli_writes_sanitized_reports_even_when_audit_fails(self):
+    def test_summary_leads_with_the_five_area_table(self):
+        self.write_full_base_flow_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        rolled = area_rollup.area_rollup(report.findings, "Demo Player", "com.example.player", "2026-08-26")
+
+        summary = render_summary(report, rolled)
+
+        self.assertIn("| Init |", summary)
+        self.assertIn("| Splash |", summary)
+        self.assertIn("| Config |", summary)
+        self.assertIn("Demo Player", summary)
+        self.assertIn("2026-08-26", summary)
+        self.assertLess(len(summary.splitlines()), 120)
+
+    def test_summary_never_contains_secret_values(self):
+        self.write_full_base_flow_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        rolled = area_rollup.area_rollup(report.findings, "Demo Player", "com.example.player", "2026-08-26")
+
+        summary = render_summary(report, rolled)
+
+        self.assertNotIn("adjust-secret", summary)
+        self.assertNotIn("facebook-client-secret", summary)
+        self.assertNotIn("tiktok-secret", summary)
+
+    def test_findings_payload_carries_every_finding_field(self):
+        self.write_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        payload = ads_audit_lib.findings_payload(report)
+
+        self.assertEqual(len(payload), len(report.findings))
+        self.assertEqual(
+            set(payload[0]),
+            {"rule_id", "category", "status", "expected", "observed", "recommendation", "location"},
+        )
+
+    def test_cli_writes_findings_json_instead_of_evidence_json(self):
         self.write_project()
         output_dir = self.root / "audit-output"
         script = SCRIPTS_DIR / "run_audit.py"
@@ -570,8 +834,9 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertTrue((output_dir / "ads-audit-summary.md").is_file())
-        evidence = (output_dir / "ads-audit-evidence.json").read_text(encoding="utf-8")
-        self.assertNotIn("facebook-client-secret", evidence)
+        self.assertFalse((output_dir / "ads-audit-evidence.json").exists())
+        findings = (output_dir / "ads-audit-findings.json").read_text(encoding="utf-8")
+        self.assertNotIn("facebook-client-secret", findings)
 
     def test_python_cli_auto_discovers_csv_inputs(self):
         self.write_project()
@@ -619,33 +884,99 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(resolved, self.ads_csv.resolve())
 
-    def test_cli_posts_to_embedded_webhook_by_default(self):
+    def test_discord_message_lists_the_five_areas_on_one_line_each(self):
+        rolled = area_rollup.AreaReport(
+            app_name="Demo Player",
+            package_name="com.example.player",
+            audit_date="2026-08-26",
+            areas=[
+                area_rollup.AreaResult("Init", "Done", ""),
+                area_rollup.AreaResult("Splash", "Done", ""),
+                area_rollup.AreaResult("Language", "Error", "thiếu removeObservers"),
+                area_rollup.AreaResult("Onboarding", "Done", ""),
+                area_rollup.AreaResult("Config", "Error", "sai 3 key config"),
+            ],
+            note="banner chưa theo base",
+            overall="Error",
+        )
+
+        message = run_audit.discord_message(rolled)
+        content = message["content"]
+
+        self.assertEqual(message["allowed_mentions"], {"parse": []})
+        self.assertIn("🚨", content)
+        self.assertIn("Demo Player", content)
+        self.assertIn("com.example.player", content)
+        self.assertIn("Language", content)
+        self.assertIn("thiếu removeObservers", content)
+        self.assertIn("Khác: banner chưa theo base", content)
+        self.assertLess(len(content), 2000)
+
+    def test_discord_message_uses_the_pass_icon_and_drops_an_empty_note(self):
+        rolled = area_rollup.AreaReport(
+            app_name="Demo", package_name="com.demo", audit_date="2026-08-26",
+            areas=[area_rollup.AreaResult(name, "Done", "")
+                   for name in ("Init", "Splash", "Language", "Onboarding", "Config")],
+            note="", overall="Done",
+        )
+
+        content = run_audit.discord_message(rolled)["content"]
+
+        self.assertIn("✅", content)
+        self.assertNotIn("Khác:", content)
+
+    def test_discord_message_caps_oversized_identity_without_dropping_areas(self):
+        rolled = area_rollup.AreaReport(
+            app_name="A" * 3_000,
+            package_name="com.example." + "p" * 3_000,
+            audit_date="2026-08-26",
+            areas=[area_rollup.AreaResult(name, "Done", "")
+                   for name in ("Init", "Splash", "Language", "Onboarding", "Config")],
+            note="banner chưa theo base",
+            overall="Done",
+        )
+
+        content = run_audit.discord_message(rolled)["content"]
+
+        self.assertLess(len(content), 2000)
+        for name in ("Init", "Splash", "Language", "Onboarding", "Config"):
+            self.assertIn(name, content)
+        self.assertIn("Khác: banner chưa theo base", content)
+
+    def test_cli_posts_one_message_without_an_attachment(self):
         self.write_project()
         output_dir = self.root / "audit-output"
+        webhook_url = "https://custom-discord.example/webhook"
         with patch.object(run_audit, "post_webhook", return_value=None) as post:
             result = run_audit.main([
                 "--project", str(self.root),
                 "--ads-script", str(self.ads_csv),
                 "--working-file", str(self.working_csv),
                 "--output-dir", str(output_dir),
+                "--webhook-url", webhook_url,
             ])
 
         self.assertEqual(result, 2)
-        self.assertGreaterEqual(post.call_count, 1)
-        self.assertEqual(post.call_args_list[0].args[0], run_audit.DEFAULT_WEBHOOK_URL)
-        discord_body = post.call_args_list[0].args[2]
-        self.assertEqual(
-            post.call_args_list[0].kwargs["attachment_path"].resolve(),
-            (output_dir / "ads-audit-summary.md").resolve(),
-        )
-        for call in post.call_args_list[1:]:
-            self.assertIsNone(call.kwargs["attachment_path"])
-        self.assertIn("content", discord_body)
-        self.assertIn("Demo Player", discord_body["content"])
-        self.assertIn("com.example.player", discord_body["content"])
-        self.assertNotIn("adjust-secret", discord_body["content"])
-        summary = (output_dir / "ads-audit-summary.md").read_text(encoding="utf-8")
-        self.assertNotIn("WEBHOOK_DELIVERY", summary)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.args[0], webhook_url)
+        content = post.call_args.args[2]["content"]
+        self.assertIn("Demo Player", content)
+        self.assertIn("com.example.player", content)
+        self.assertNotIn("adjust-secret", content)
+        self.assertIsNone(post.call_args.kwargs.get("attachment_path"))
+
+    def test_cli_does_not_post_without_an_explicit_webhook_configuration(self):
+        self.write_project()
+        with patch.dict("os.environ", {}, clear=True), \
+             patch.object(run_audit, "post_webhook", return_value=None) as post:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        post.assert_not_called()
 
     def test_cli_does_not_post_when_no_webhook_is_requested(self):
         self.write_project()
@@ -659,6 +990,52 @@ class AdsAuditTest(unittest.TestCase):
             ])
 
         post.assert_not_called()
+
+    def test_cli_pushes_a_sheet_row_when_a_token_is_configured(self):
+        self.write_project()
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+                "--sheet-token", "secret-token",
+            ])
+
+        push.assert_called_once()
+        self.assertEqual(push.call_args.args[0], run_audit.DEFAULT_SHEET_URL)
+        self.assertEqual(push.call_args.args[1]["token"], "secret-token")
+
+    def test_cli_skips_the_sheet_push_without_a_token(self):
+        self.write_project()
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        push.assert_not_called()
+
+    def test_sheet_delivery_failure_becomes_a_finding_without_leaking_the_url(self):
+        self.write_project()
+        output_dir = self.root / "audit-output"
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value="HTTP 500"):
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(output_dir),
+                "--sheet-token", "secret-token",
+            ])
+
+        summary = (output_dir / "ads-audit-summary.md").read_text(encoding="utf-8")
+        self.assertIn("SHEET_DELIVERY", summary)
+        self.assertNotIn("secret-token", summary)
 
     def test_webhook_url_adds_wait_parameter_without_leaking_credentials(self):
         url = "https://example.test/hook/secret"
@@ -800,181 +1177,6 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("ARCH_PRIMARY_SCREENS_ACTIVITY").status, "PASS")
 
-    def test_mkt_webhook_names_app_and_explains_primary_fragment_error(self):
-        checklist = parse_working_file(self.working_csv)
-        payload = build_webhook_payload(
-            "repo-folder",
-            checklist,
-            [
-                Finding.fail(
-                    "ARCH_PRIMARY_SCREENS_ACTIVITY",
-                    "architecture",
-                    "separate Activities",
-                    "SplashFragment, OnboardingFragment",
-                    "Move primary screens to Activities.",
-                )
-            ],
-        )
-
-        self.assertEqual(payload["ket_qua"], "CẦN SỬA")
-        self.assertEqual(payload["ten_app"], "Demo Player")
-        self.assertEqual(payload["package_name"], "com.example.player")
-        self.assertEqual(len(payload["loi"]), 1)
-        self.assertIn("1 Activity", payload["loi"][0]["mo_ta"])
-        self.assertNotIn("adjust-secret", json.dumps(payload, ensure_ascii=False))
-
-    def test_mkt_payload_groups_duplicate_findings_and_keeps_original_counts(self):
-        checklist = parse_working_file(self.working_csv)
-        findings = [
-            Finding.fail("APP_NAME", "identity", "expected", "wrong", "fix"),
-            Finding.fail("APP_PACKAGE", "identity", "expected", "wrong", "fix"),
-            Finding.fail("ADMOB_APP_ID", "identity", "expected", "wrong", "fix"),
-        ]
-        findings.extend(
-            Finding.fail(f"AD_CONFIG_RELEASE:placement_{index}", "ad_config", "ad-unit-secret", "wrong", "fix")
-            for index in range(25)
-        )
-        findings.extend([
-            Finding.fail("TOKEN:Adjust token", "token", "secret", "missing", "fix"),
-            Finding.needs_mapping("PLACEMENT_FLOW:banner_home", "mapping", "missing", "map it"),
-            Finding.needs_mapping("PLACEMENT_FLOW:inter_home", "mapping", "missing", "map it"),
-            Finding.needs_runtime("RUNTIME:inter_splash", "journey", "runtime", "test splash"),
-            Finding.needs_runtime("RUNTIME:inter_onboarding", "journey", "runtime", "test onboarding"),
-        ])
-
-        payload = build_webhook_payload("repo", checklist, findings)
-        entries = payload["loi"]
-        app_info = [entry for entry in entries if entry["tieu_de"] == "Thông tin app chưa khớp checklist"]
-        release_config = [entry for entry in entries if entry["tieu_de"] == "Cấu hình quảng cáo release (ad_config.json) chưa đúng"]
-
-        self.assertEqual(len(app_info), 1)
-        self.assertIn("app_name", app_info[0]["mo_ta"])
-        self.assertIn("package_name", app_info[0]["mo_ta"])
-        self.assertIn("AdMob App ID", app_info[0]["mo_ta"])
-        self.assertEqual(len(release_config), 1)
-        self.assertIn("placement_0", release_config[0]["mo_ta"])
-        self.assertIn("và 15 key khác", release_config[0]["mo_ta"])
-        self.assertEqual(len(entries), len({(entry["tieu_de"], entry["mo_ta"], entry["can_lam"]) for entry in entries}))
-        self.assertEqual(payload["tong_quan"]["loi_can_sua"], 29)
-        self.assertEqual(payload["tong_quan"]["can_ky_thuat_xac_nhan"], 4)
-        self.assertEqual(len(payload["can_xac_nhan"]), 2)
-        self.assertIn("banner_home", payload["can_xac_nhan"][0])
-        self.assertIn("inter_splash", payload["can_xac_nhan"][1])
-
-        discord = run_audit.discord_message_payload(payload)
-        self.assertLessEqual(len(discord["content"]), 2000)
-        self.assertNotIn("ad-unit-secret", discord["content"])
-        self.assertNotIn("Adjust token", discord["content"])
-
-    def test_mkt_payload_groups_base_flow_errors_by_area_without_duplicate_titles(self):
-        checklist = parse_working_file(self.working_csv)
-        findings = [
-            Finding.fail("ARCH_GLOBAL_INIT_ORDER", "architecture", "base order", "wrong", "fix"),
-            Finding.fail("ARCH_DEV_CONFIG_INIT", "architecture", "dev config", "missing", "fix"),
-            Finding.fail("FLOW_SPLASH_REMOTE_CONFIG", "placement_flow", "splash", "missing", "fix"),
-            Finding.fail("FLOW_SPLASH_INTER_PRELOAD_LANGUAGE", "placement_flow", "splash", "missing", "fix"),
-            Finding.fail("FLOW_LANGUAGE_PRELOAD_AND_RENDER", "placement_flow", "language", "missing", "fix"),
-            Finding.fail("ARCH_ADS_MANAGER_UA_GATES", "architecture", "ua", "hardcoded", "fix"),
-            Finding.fail("ARCH_ADS_MANAGER_INTER_GATES", "architecture", "inter", "missing", "fix"),
-        ]
-
-        payload = build_webhook_payload("repo", checklist, findings)
-        titles = [entry["tieu_de"] for entry in payload["loi"]]
-
-        self.assertEqual(len(titles), len(set(titles)))
-        self.assertIn("Khởi tạo Ads/Config chưa đúng base", titles)
-        self.assertIn("Flow Splash chưa đúng base", titles)
-        self.assertIn("Flow Language chưa đúng base", titles)
-        self.assertIn("AdsManager chưa đúng base", titles)
-        self.assertNotIn("Cần dev kiểm tra phần gắn quảng cáo", titles)
-        splash = next(entry for entry in payload["loi"] if entry["tieu_de"] == "Flow Splash chưa đúng base")
-        self.assertIn("Native Language", splash["mo_ta"])
-        self.assertIn("sau khi inter_splash tải thành công", splash["mo_ta"])
-        self.assertIn("SplashActivity", splash["can_lam"])
-        self.assertIn("onAdLoaded", splash["can_lam"])
-        language = next(entry for entry in payload["loi"] if entry["tieu_de"] == "Flow Language chưa đúng base")
-        self.assertIn("preload quảng cáo cho trang Onboarding đầu tiên", language["mo_ta"])
-        manager = next(entry for entry in payload["loi"] if entry["tieu_de"] == "AdsManager chưa đúng base")
-        self.assertIn("điều kiện bật quảng cáo", manager["mo_ta"])
-        technical_rule_ids = [
-            "ARCH_GLOBAL_INIT_ORDER",
-            "ARCH_DEV_CONFIG_INIT",
-            "ARCH_ADS_CONFIG_FIELDS",
-            "ARCH_APP_OPEN_EXCLUSIONS",
-            "ARCH_MOBILE_ADS_INIT",
-            "ARCH_REMOTE_CONFIG_INIT",
-            "ARCH_ERAIN_INIT",
-            "ARCH_INTERSTITIAL_INTERVAL",
-            "FLOW_SPLASH_REMOTE_CONFIG",
-            "FLOW_SPLASH_INTER_PRELOAD_LANGUAGE",
-            "ARCH_ADS_MANAGER_UA_GATES",
-        ]
-        mkt_json = json.dumps(payload["loi"], ensure_ascii=False)
-        for rule_id in technical_rule_ids:
-            self.assertNotIn(rule_id, mkt_json)
-        self.assertNotIn("Rule ảnh hưởng", mkt_json)
-
-        discord = run_audit.discord_message_payload(payload)["content"]
-        self.assertIn("Ads Audit: CẦN SỬA", discord)
-        self.assertIn("**1. Khởi tạo Ads/Config chưa đúng base**", discord)
-        self.assertNotIn("**1. Khởi tạo Ads/Config chưa đúng base**\n\nMô tả:", discord)
-        self.assertNotIn("**1. Khởi tạo Ads/Config chưa đúng base**\n\n**Mô tả:**", discord)
-        self.assertIn("**1. Khởi tạo Ads/Config chưa đúng base**\n**Mô tả:**\n", discord)
-        self.assertIn("Mobile Ads, DevConfig, config quảng cáo và SDK quảng cáo chưa được khởi tạo đúng thứ tự.", discord)
-        self.assertIn("\n**Cách sửa:**\n", discord)
-        self.assertIn("Trong GlobalApp, khởi tạo lần lượt", discord)
-        self.assertNotIn("Cách sửa: Dev sửa", discord)
-        self.assertEqual(discord.count("Flow Splash chưa đúng base"), 1)
-        self.assertNotIn("→", discord)
-        for rule_id in technical_rule_ids:
-            self.assertNotIn(rule_id, discord)
-
-    def test_discord_report_can_split_long_audit_into_multiple_messages(self):
-        payload = {
-            "ket_qua": "CẦN SỬA",
-            "ten_app": "Long App",
-            "package_name": "com.example.long",
-            "tong_quan": {"loi_can_sua": 12, "can_ky_thuat_xac_nhan": 0, "muc_da_kiem_tra_dung": 4},
-            "loi": [
-                {
-                    "tieu_de": f"Lỗi nhóm {index}",
-                    "mo_ta": "- " + ("Mô tả dễ hiểu cho MKT. " * 18),
-                    "can_lam": "- " + ("Cách sửa chi tiết cho dev. " * 18),
-                }
-                for index in range(1, 13)
-            ],
-            "can_xac_nhan": [],
-        }
-
-        messages = run_audit.discord_message_payloads(payload, max_content_length=900)
-
-        self.assertGreater(len(messages), 1)
-        self.assertTrue(all(len(message["content"]) <= 900 for message in messages))
-        self.assertIn("Ads Audit: CẦN SỬA", messages[0]["content"])
-        self.assertIn("Ads Audit chi tiết (2/", messages[1]["content"])
-        combined = "\n".join(message["content"] for message in messages)
-        self.assertIn("**1. Lỗi nhóm 1**\n**Mô tả:**", combined)
-        self.assertNotIn("**1. Lỗi nhóm 1**\n\n**Mô tả:**", combined)
-        self.assertIn("**12. Lỗi nhóm 12**", combined)
-
-    def test_webhook_posts_summary_markdown_as_discord_attachment(self):
-        url = "https://example.test/hook"
-        summary = self.root / "ads-audit-summary.md"
-        summary.write_text("# Summary\n", encoding="utf-8")
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"200", stderr=b"")
-        with patch.object(run_audit.subprocess, "run", return_value=completed) as run:
-            result = run_audit.post_webhook(url, None, {"content": "ok"}, attachment_path=summary)
-
-        self.assertIsNone(result)
-        command = run.call_args.args[0]
-        self.assertIn("--form", command)
-        self.assertIn("--form-string", command)
-        payload_arg = command[command.index("--form-string") + 1]
-        self.assertTrue(payload_arg.startswith("payload_json="))
-        self.assertEqual(json.loads(payload_arg.removeprefix("payload_json=")), {"content": "ok"})
-        self.assertIn(f"files[0]=@{summary};filename=ads-audit-summary.md", command)
-        self.assertNotIn("--data-binary", command)
-
     def test_welcome_back_requires_resume_gate_and_welcome_load_show_chain(self):
         self.write_project()
         global_app = self.root / "app/src/main/java/com/example/GlobalApp.kt"
@@ -1067,6 +1269,95 @@ class AdsAuditTest(unittest.TestCase):
         self.assertEqual(report.finding("ARCH_ADS_MANAGER_UA_GATES").status, "FAIL")
         self.assertIn("config.enableUaCheck", report.finding("ARCH_ADS_MANAGER_UA_GATES").recommendation)
 
+    def test_language_must_remove_the_other_native_observer_when_swapping(self):
+        self.write_full_base_flow_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertEqual(report.finding("FLOW_LANGUAGE_OBSERVER_SWAP").status, "PASS")
+
+        language = self.root / "app/src/main/java/com/example/LanguageActivity.kt"
+        language.write_text(
+            language.read_text(encoding="utf-8").replace(
+                "AdsManager.nativeLanguageClickAdLive.removeObservers(this); ", ""
+            ),
+            encoding="utf-8",
+        )
+        broken = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = broken.finding("FLOW_LANGUAGE_OBSERVER_SWAP")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("nativeLanguageClickAdLive.removeObservers", finding.observed)
+
+    def test_onboarding_page_must_observe_with_the_view_lifecycle_owner(self):
+        self.write_full_base_flow_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertEqual(report.finding("FLOW_ONBOARDING_PAGE_LIFECYCLE").status, "PASS")
+
+        page = self.root / "app/src/main/java/com/example/OnboardingPageFragment.kt"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("observe(viewLifecycleOwner)", "observe(this)"),
+            encoding="utf-8",
+        )
+        broken = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(broken.finding("FLOW_ONBOARDING_PAGE_LIFECYCLE").status, "FAIL")
+
+    def test_onboarding_page_lifecycle_rule_is_silent_without_the_fragment(self):
+        self.write_project()
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertFalse(any(f.rule_id == "FLOW_ONBOARDING_PAGE_LIFECYCLE" for f in report.findings))
+
+    def test_onboarding_page_observe_call_wrapped_still_passes(self):
+        self.write_full_base_flow_project()
+        page = self.root / "app/src/main/java/com/example/OnboardingPageFragment.kt"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "observe(viewLifecycleOwner)",
+                "observe(\n        viewLifecycleOwner,\n    )"
+            ),
+            encoding="utf-8",
+        )
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertEqual(report.finding("FLOW_ONBOARDING_PAGE_LIFECYCLE").status, "PASS")
+
+    def test_onboarding_page_observe_call_with_spaces_passes(self):
+        self.write_full_base_flow_project()
+        page = self.root / "app/src/main/java/com/example/OnboardingPageFragment.kt"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "observe(viewLifecycleOwner)",
+                "observe( viewLifecycleOwner )"
+            ),
+            encoding="utf-8",
+        )
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertEqual(report.finding("FLOW_ONBOARDING_PAGE_LIFECYCLE").status, "PASS")
+
+    def test_onboarding_page_mixed_observers_fail(self):
+        self.write_full_base_flow_project()
+        page = self.root / "app/src/main/java/com/example/OnboardingPageFragment.kt"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "fun observeAdChannel(){",
+                "fun observeAdChannel(){\nval someOtherLive = MutableLiveData<String>()\nsomeOtherLive.observe(this){ }; "
+            ),
+            encoding="utf-8",
+        )
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        finding = report.finding("FLOW_ONBOARDING_PAGE_LIFECYCLE")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("this", finding.observed)
+
+    def test_onboarding_page_fragment_present_but_never_observes_is_silent(self):
+        self.write_full_base_flow_project()
+        page = self.root / "app/src/main/java/com/example/OnboardingPageFragment.kt"
+        page.write_text(
+            "class OnboardingPageFragment { fun renderAd(ad: ApNativeAd?){ if(ad != null){ populateNativeAdView(requireActivity(), ad, mBinding.layoutAds, mBinding.shimmerAds.shimmerNativeMedium) } else { mBinding.layoutAds.invisibleView(); mBinding.layoutAdsFull.invisibleView() } } }",
+            encoding="utf-8",
+        )
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        self.assertFalse(any(f.rule_id == "FLOW_ONBOARDING_PAGE_LIFECYCLE" for f in report.findings))
+
     def test_package_skill_zip_excludes_generated_caches_and_reports(self):
         skill_root = self.root / "infinity-ads-compliance-audit"
         skill_root.mkdir()
@@ -1138,6 +1429,250 @@ class AdsAuditTest(unittest.TestCase):
                 "--working-file", str(self.working_csv),
             ])
             self.assertEqual(post.call_args_list[0].args[0], "https://custom-discord.example/webhook")
+
+
+class SheetPushTest(unittest.TestCase):
+    def area_report(self):
+        return area_rollup.AreaReport(
+            app_name="Demo Player",
+            package_name="com.example.player",
+            audit_date="2026-08-26",
+            areas=[
+                area_rollup.AreaResult("Init", "Done", ""),
+                area_rollup.AreaResult("Splash", "Done", ""),
+                area_rollup.AreaResult("Language", "Error", "thiếu removeObservers"),
+                area_rollup.AreaResult("Onboarding", "Done", ""),
+                area_rollup.AreaResult("Config", "Error", "sai 3 key config"),
+            ],
+            note="banner chưa theo base",
+            overall="Error",
+        )
+
+    def test_row_carries_exactly_the_documented_fields(self):
+        row = sheet_push.build_row(self.area_report(), "secret-token")
+
+        self.assertEqual(
+            set(row),
+            {"token", "package", "app_name", "date", "init", "splash",
+             "language", "onboarding", "config", "note"},
+        )
+        self.assertEqual(row["package"], "com.example.player")
+        self.assertEqual(row["date"], "2026-08-26")
+        self.assertEqual(row["language"], "Error")
+        self.assertEqual(row["init"], "Done")
+
+    def test_row_note_merges_the_area_reasons_and_the_note(self):
+        row = sheet_push.build_row(self.area_report(), None)
+
+        self.assertIn("thiếu removeObservers", row["note"])
+        self.assertIn("sai 3 key config", row["note"])
+        self.assertIn("banner chưa theo base", row["note"])
+
+    def test_post_row_reads_the_reply_behind_the_redirect(self):
+        posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":true,"row":7}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[posted, replied]) as run:
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {"package": "com.x"})
+
+        self.assertIsNone(result)
+        post_command = run.call_args_list[0].args[0]
+        self.assertNotIn("--location", post_command)
+        self.assertIn("https://script.googleusercontent.com/echo?k=1", run.call_args_list[1].args[0])
+
+    def test_post_row_surfaces_an_apps_script_rejection(self):
+        posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":false,"error":"unauthorized"}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[posted, replied]):
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {})
+
+        self.assertIn("unauthorized", result)
+
+    def test_non_object_json_replies_return_one_sanitized_error(self):
+        malformed_replies = (b"[]", b"null", b'"text"', b"42", b"true", b"false")
+
+        for reply in malformed_replies:
+            with self.subTest(reply=reply):
+                with patch.object(
+                    sheet_push.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, reply, b""),
+                ):
+                    result = sheet_push._read_reply("https://example.test/result", 30)
+
+                self.assertEqual(result, "Apps Script reply was not a JSON object")
+
+    def test_post_row_does_not_echo_token_or_endpoint_from_a_rejection(self):
+        url = "https://script.google.com/macros/s/SECRET-ID/exec"
+        posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":false,"error":"secret-token at https://script.google.com/macros/s/SECRET-ID/exec"}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[posted, replied]):
+            result = sheet_push.post_row(url, {"token": "secret-token"})
+
+        self.assertNotIn("secret-token", result)
+        self.assertNotIn("SECRET-ID", result)
+
+    def test_post_row_rejection_does_not_echo_an_unrelated_credential(self):
+        posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":false,"error":"webhook-token=unrelated-service-secret"}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[posted, replied]):
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {})
+
+        self.assertEqual(result, "Apps Script rejected the row")
+        self.assertNotIn("unrelated-service-secret", result)
+
+    def test_post_row_never_echoes_the_endpoint_or_stderr(self):
+        url = "https://script.google.com/macros/s/SECRET-ID/exec"
+        with patch.object(sheet_push.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 7, b"", b"contains SECRET-ID")):
+            result = sheet_push.post_row(url, {})
+
+        self.assertEqual(result, "curl exited with code 7")
+        self.assertNotIn("SECRET-ID", result)
+
+    def test_post_row_reports_missing_curl_and_timeouts(self):
+        with patch.object(sheet_push.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertEqual(sheet_push.post_row("https://x/exec", {}), "curl is not installed")
+        with patch.object(sheet_push.subprocess, "run", side_effect=subprocess.TimeoutExpired("curl", 30)):
+            self.assertEqual(sheet_push.post_row("https://x/exec", {}), "curl timed out")
+
+    @unittest.skipUnless(shutil.which("node"), "node is required to execute the Apps Script template")
+    def test_apps_script_receiver_rejects_requests_when_script_property_is_missing(self):
+        template = Path(__file__).resolve().parents[1] / "templates/apps-script-sheet.gs"
+        harness = r"""
+const fs = require('fs');
+const source = fs.readFileSync(0, 'utf8');
+let sheetAccesses = 0;
+global.PropertiesService = {
+  getScriptProperties() {
+    return { getProperty() { return null; } };
+  },
+};
+global.ContentService = {
+  MimeType: { JSON: 'json' },
+  createTextOutput(text) {
+    return { text, setMimeType() { return this; } };
+  },
+};
+global.SpreadsheetApp = {
+  getActiveSpreadsheet() {
+    sheetAccesses += 1;
+    throw new Error('sheet must not be accessed without a configured secret');
+  },
+};
+eval(source);
+const response = doPost({ postData: { contents: JSON.stringify({ token: '' }) } });
+process.stdout.write(JSON.stringify({ body: JSON.parse(response.text), sheetAccesses }));
+"""
+
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness],
+            input=template.read_text(encoding="utf-8"),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result, {"body": {"ok": False, "error": "unauthorized"}, "sheetAccesses": 0})
+
+
+class AreaRollupTest(unittest.TestCase):
+    def rollup(self, findings, **kwargs):
+        return area_rollup.area_rollup(findings, "Demo Player", "com.example.player", "2026-08-26", **kwargs)
+
+    def test_all_pass_rolls_up_to_five_done_areas(self):
+        report = self.rollup([Finding.pass_("ARCH_GLOBAL_INIT_ORDER", "architecture", "x", "found")])
+
+        self.assertEqual([area.name for area in report.areas],
+                         ["Init", "Splash", "Language", "Onboarding", "Config"])
+        self.assertEqual({area.status for area in report.areas}, {"Done"})
+        self.assertEqual(report.overall, "Done")
+        self.assertEqual(report.note, "")
+
+    def test_a_fail_marks_only_its_own_area(self):
+        report = self.rollup([Finding.fail("FLOW_LANGUAGE_OBSERVER_SWAP", "placement_flow", "x", "y", "fix")])
+
+        statuses = {area.name: area.status for area in report.areas}
+        self.assertEqual(statuses["Language"], "Error")
+        self.assertEqual(statuses["Splash"], "Done")
+        self.assertEqual(report.overall, "Error")
+
+    def test_needs_mapping_and_runtime_proof_leave_the_area_done(self):
+        report = self.rollup([
+            Finding.needs_mapping("PLACEMENT_FLOW:inter_onboarding", "x", "y", "fix"),
+            Finding.needs_runtime("RUNTIME:inter_splash", "x", "y", "fix"),
+        ])
+
+        self.assertEqual({area.status for area in report.areas}, {"Done"})
+        self.assertEqual(report.overall, "Done")
+
+    def test_error_reason_uses_the_short_vietnamese_phrase(self):
+        report = self.rollup([Finding.fail("FLOW_LANGUAGE_OBSERVER_SWAP", "placement_flow", "x", "y", "fix")])
+
+        language = next(area for area in report.areas if area.name == "Language")
+        self.assertEqual(language.reason, "thiếu removeObservers")
+
+    def test_config_failures_collapse_to_a_single_count_phrase(self):
+        report = self.rollup([
+            Finding.fail("AD_CONFIG_RELEASE:native_home", "ad_config", "x", "y", "fix"),
+            Finding.fail("AD_CONFIG_RELEASE:inter_splash", "ad_config", "x", "y", "fix"),
+            Finding.fail("AD_CONFIG_RELEASE:ENABLE:native_home", "ad_config", "x", "y", "fix"),
+        ])
+
+        config = next(area for area in report.areas if area.name == "Config")
+        self.assertEqual(config.reason, "sai 3 key config")
+
+    def test_out_of_scope_failures_land_in_the_note(self):
+        report = self.rollup([Finding.fail("ARCH_BANNER_BASE_RELOAD", "architecture", "x", "y", "fix")])
+
+        self.assertEqual({area.status for area in report.areas}, {"Done"})
+        self.assertIn("banner", report.note)
+
+    def test_note_is_capped_and_marked_when_truncated(self):
+        findings = [
+            Finding.fail(f"UNKNOWN_RULE_{index}", "architecture", "x", "y", "fix")
+            for index in range(40)
+        ]
+        report = self.rollup(findings)
+
+        self.assertLessEqual(len(report.note), 200)
+        self.assertTrue(report.note.endswith("…"))
+
+    def test_reason_cap_includes_the_ellipsis_at_exactly_120_characters(self):
+        capped = area_rollup._join_capped(["r" * 120, "overflow"], 120)
+
+        self.assertEqual(len(capped), 120)
+        self.assertEqual(capped, "r" * 119 + "…")
+
+    def test_note_cap_includes_the_ellipsis_at_exactly_200_characters(self):
+        capped = area_rollup._join_capped(["n" * 200, "overflow"], 200)
+
+        self.assertEqual(len(capped), 200)
+        self.assertEqual(capped, "n" * 199 + "…")
+
+    def test_reason_is_capped_at_120_characters(self):
+        findings = [
+            Finding.fail(rule, "architecture", "x", "y", "fix")
+            for rule in ("ARCH_GLOBAL_INIT_ORDER", "ARCH_DEV_CONFIG_INIT", "ARCH_DEV_CONFIG_BUILD_FIELDS",
+                         "ARCH_ADS_CONFIG_FIELDS", "ARCH_APP_OPEN_EXCLUSIONS", "ARCH_MOBILE_ADS_INIT",
+                         "ARCH_REMOTE_CONFIG_INIT", "ARCH_ERAIN_INIT", "ARCH_INTERSTITIAL_INTERVAL")
+        ]
+        report = self.rollup(findings)
+
+        init = next(area for area in report.areas if area.name == "Init")
+        self.assertLessEqual(len(init.reason), 120)
+
+    def test_area_of_maps_placement_flow_rules_to_their_screen(self):
+        self.assertEqual(area_rollup.area_of("PLACEMENT_FLOW:native_language_1"), "splash")
+        self.assertEqual(area_rollup.area_of("PLACEMENT_FLOW:native_language_1_click"), "language")
+        self.assertEqual(area_rollup.area_of("AD_CONFIG_RELEASE:ENABLE:native_home"), "config")
+        self.assertIsNone(area_rollup.area_of("ARCH_BANNER_BASE_RELOAD"))
+
+    def test_audit_date_defaults_to_today(self):
+        report = area_rollup.area_rollup([], "Demo", "com.demo")
+
+        self.assertRegex(report.audit_date, r"^\d{4}-\d{2}-\d{2}$")
 
 
 if __name__ == "__main__":

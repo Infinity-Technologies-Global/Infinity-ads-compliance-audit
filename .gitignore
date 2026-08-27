@@ -2,10 +2,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.pytest_cache/
 ads-audit-output/
+.pytest_cache/
 node_modules/
 .DS_Store
 .idea/
 .vscode/
 *.zip
+.superpowers/
