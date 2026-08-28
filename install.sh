@@ -61,13 +61,12 @@ for target in "${TARGETS[@]}"; do
             --exclude='__pycache__' \
             --exclude='*.pyc' \
             --exclude='ads-audit-output' \
-            --exclude='docs' \
             --exclude='node_modules' \
             "$SCRIPT_DIR/" "$target/"
     else
         for item in "$SCRIPT_DIR"/*; do
             case "$(basename "$item")" in
-                CLAUDE.md|__pycache__|ads-audit-output|docs|node_modules) continue ;;
+                CLAUDE.md|__pycache__|ads-audit-output|node_modules) continue ;;
             esac
             cp -R "$item" "$target/"
         done

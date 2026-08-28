@@ -37,7 +37,7 @@ if ($Targets.Count -eq 0) {
 Write-Host "⏳ Installing skill files..."
 $ExcludedNames = @(
     ".agents", ".claude", ".codex", ".git", ".pytest_cache", ".superpowers",
-    "CLAUDE.md", "__pycache__", "ads-audit-output", "docs", "node_modules"
+    "CLAUDE.md", "__pycache__", "ads-audit-output", "node_modules"
 )
 foreach ($Target in $Targets) {
     if (!(Test-Path -Path $Target)) {

@@ -1764,7 +1764,7 @@ adds.
 
 ```bash
 cd /home/infinity01/Skill/Infinity-ads-compliance-audit-main
-ADS_AUDIT_SHEET_TOKEN=report-ads python3 scripts/run_audit.py \
+ADS_AUDIT_SHEET_TOKEN=<sheet-secret> python3 scripts/run_audit.py \
   --project /home/infinity01/StudioProjects/TestSill \
   --ads-script <path to an ADS SCRIPTS csv> \
   --working-file <path to a working checklist csv> \

@@ -29,7 +29,7 @@
       "type": "object",
       "required": ["package", "app_name", "date", "init", "splash", "language", "onboarding", "config", "note"],
       "properties": {
-        "token": {"type": "string", "description": "Apps Script shared secret; never stored in the repository"},
+        "token": {"type": "string", "description": "Apps Script shared secret (write-only: append a row); ships as DEFAULT_SHEET_TOKEN, overridable per run"},
         "package": {"type": "string"},
         "app_name": {"type": "string"},
         "date": {"type": "string"},

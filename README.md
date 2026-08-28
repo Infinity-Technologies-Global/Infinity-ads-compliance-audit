@@ -182,28 +182,25 @@ Discord delivery is opt-in. Configure the endpoint with `--webhook-url` or the
 one, the audit keeps only the local reports. Use `--no-webhook` to ignore an
 inherited environment configuration.
 
-## Optional audit spreadsheet
+## Audit spreadsheet
 
-Each audit appends one row:
+Every audit appends one row to Infinity's shared audit sheet:
 
 `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
 
-The rows arrive through a Google Apps Script Web App bound to the spreadsheet;
-`templates/apps-script-sheet.gs` is the script to paste into it.
+This works with no setup. The skill ships both the Google Apps Script Web App
+URL and its shared secret, so an installed skill logs each run automatically.
+The secret is write-only — it can append a row to the `Audit Log` tab and
+nothing else (no read, no edit, no delete).
 
-The endpoint is embedded in the skill. **The shared secret is not** — this skill
-gets packaged into partner repositories, so the secret would travel with it. Set
-it yourself. In Apps Script, open **Project Settings > Script Properties** and
-add the required `ADS_AUDIT_SHEET_TOKEN` property. Then give the auditor the
-same value:
+To send results somewhere else instead, override any of:
 
-```bash
-export ADS_AUDIT_SHEET_TOKEN=<the secret configured in the Apps Script>
-```
+- `--sheet-url` / `ADS_AUDIT_SHEET_URL` — the endpoint;
+- `--sheet-token` / `ADS_AUDIT_SHEET_TOKEN` / a `scripts/.sheet-token` file — the secret.
 
-Without it the push is skipped with a note on stderr and the audit still
-succeeds. Disable it outright with `--no-sheet`, or point somewhere else with
-`--sheet-url` / `ADS_AUDIT_SHEET_URL`.
+`templates/apps-script-sheet.gs` is the deployed receiver script, for
+reproducing or rotating the deployment. Pass `--no-sheet` to skip the push
+entirely; the audit still succeeds and still writes its local reports.
 
 ## Running the auditor directly
 

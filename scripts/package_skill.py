@@ -17,14 +17,19 @@ EXCLUDED_DIRS = {
     ".codex",
     ".superpowers",
     "ads-audit-output",
-    "docs",
 }
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+# A developer's local secret override. The skill ships a working default in
+# run_audit.py, so this file only ever holds a personal or test value — never
+# package it.
+EXCLUDED_NAMES = {".sheet-token"}
 
 
 def should_include(path: Path, root: Path) -> bool:
     relative = path.relative_to(root)
     if any(part in EXCLUDED_DIRS for part in relative.parts):
+        return False
+    if path.name in EXCLUDED_NAMES:
         return False
     return path.suffix not in EXCLUDED_SUFFIXES
 

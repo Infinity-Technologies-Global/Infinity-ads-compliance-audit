@@ -260,17 +260,19 @@ A `302` with a redirect URL means `doPost` ran. Step 2 distinguishes `{"ok":true
 
 | Value | Where it lives |
 | --- | --- |
-| Web App URL | Embedded in `run_audit.py` as `DEFAULT_SHEET_URL`, overridable with `--sheet-url` or `ADS_AUDIT_SHEET_URL` |
-| Shared secret | **Never committed.** `--sheet-token` or `ADS_AUDIT_SHEET_TOKEN` only |
+| Web App URL | `run_audit.py` `DEFAULT_SHEET_URL`, overridable with `--sheet-url` or `ADS_AUDIT_SHEET_URL` |
+| Shared secret | `run_audit.py` `DEFAULT_SHEET_TOKEN`, overridable in priority order by `--sheet-token`, `ADS_AUDIT_SHEET_TOKEN`, or a gitignored `scripts/.sheet-token` file |
 
-`scripts/package_skill.py` zips the whole skill directory, so anything written into a
-source file ships to every partner repo. The URL is safe to embed because the script
-rejects a request without the matching secret; the secret is not, because embedding it
-would hand every partner write access to Infinity's internal audit sheet.
+**Revised 2026-08-28.** The secret is now shipped alongside the URL so an installed
+skill logs every run with no operator setup. It is safe enough to ship because the Apps
+Script grants exactly one capability against that value — append a row to the `Audit
+Log` tab — with no read, edit, or delete. Rotate by changing `DEFAULT_SHEET_TOKEN` and
+`templates/apps-script-sheet.gs` together. `scripts/.sheet-token` stays gitignored and
+excluded from packages so a developer can point a local run at a test sheet without
+touching source.
 
-When the secret is absent the push is skipped with a one-line notice on stderr, and the
-audit succeeds. This keeps a partner running the skill from seeing an unexplained
-failure for a channel that is not theirs.
+When the secret is blanked from every source the push is skipped with a one-line notice
+on stderr, and the audit still succeeds.
 
 ## Error handling
 
@@ -278,7 +280,7 @@ failure for a channel that is not theirs.
 | --- | --- |
 | Discord POST fails | Existing behaviour: append a `WEBHOOK_DELIVERY` finding, rewrite local reports |
 | Sheet POST fails, or the reply is not `{"ok":true}` | Append a `SHEET_DELIVERY` finding the same way; local reports and Discord still succeed |
-| No sheet token configured | Skip the push, one line on stderr |
+| No sheet token from any source (flag, env, `scripts/.sheet-token`) | Skip the push, one line on stderr |
 | `--base-project` path unreadable | Setup error, exit 1 |
 | Rule id missing from the area table | Treat as out of scope, log once to stderr |
 
