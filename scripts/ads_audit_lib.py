@@ -853,6 +853,87 @@ def _primary_screen_for_fragment(class_name: str) -> str | None:
     return next((token for token in PRIMARY_SCREEN_TOKENS if token in normalized), None)
 
 
+def _manifest_activity_names(manifests: list[Path]) -> set[str]:
+    """Simple class names of every `<activity>` the manifests declare."""
+    names: set[str] = set()
+    for path in manifests:
+        for class_name in re.findall(r'<activity\b[^>]*(?:android:)?name\s*=\s*["\']([^"\']+)["\']', _read(path)):
+            names.add(_simple_class_name(class_name))
+    return names
+
+
+def _primary_activity_names(activity_names: Iterable[str]) -> list[str]:
+    return sorted(
+        name for name in activity_names
+        if any(token in _normalized_name(name) for token in PRIMARY_SCREEN_TOKENS)
+    )
+
+
+def _check_screen_architecture(report: AuditReport, root: Path, manifests: list[Path]) -> None:
+    """Tell a multi-Activity journey apart from a single-Activity app.
+
+    The base gives Splash, Language, Onboarding, Home, and Welcome an Activity
+    each, because every ad gate — the AppOpen exclusions, the interstitial
+    interval, the per-screen native observers — is keyed to an Activity
+    lifecycle. An app that routes the whole journey through one Activity breaks
+    those gates even when it declares no `*Fragment` class for
+    `_check_primary_screen_activities` to catch, which is the case for a
+    Compose or nav-graph app whose destinations are not named after screens.
+    """
+    activity_names = _manifest_activity_names(manifests)
+    primary = _primary_activity_names(activity_names)
+    location = str(manifests[0].relative_to(root)) if manifests else None
+    observed = f"{len(activity_names)} Activity declaration(s), {len(primary)} on the ads journey"
+    if primary:
+        observed += f": {', '.join(primary)}"
+    expected = "a separate Activity per primary screen (Splash, Language, Onboarding, Home, Welcome)"
+    if len(primary) >= 2:
+        report.findings.append(Finding.pass_("ARCH_SCREEN_ARCHITECTURE", "architecture", expected, observed, location))
+    else:
+        report.findings.append(Finding.fail(
+            "ARCH_SCREEN_ARCHITECTURE",
+            "architecture",
+            expected,
+            f"single-Activity architecture: {observed}",
+            "Split the ads journey into separate Activities as the Infinity base does, and declare each one in AndroidManifest.xml.",
+            location,
+        ))
+
+
+def _check_language_single_activity(report: AuditReport, root: Path, manifests: list[Path]) -> None:
+    """Language is exactly one Activity in the base, never a split screen pair.
+
+    `LanguageActivity` owns both the language list and the language-click native
+    by swapping observers between `nativeLanguageAdLive` and
+    `nativeLanguageClickAdLive` — the two are mutually exclusive. Splitting that
+    across two Activities loses the swap, so both natives can render and the
+    click native is charged against the wrong screen.
+    """
+    activities = sorted(name for name in _manifest_activity_names(manifests) if "language" in _normalized_name(name))
+    location = str(manifests[0].relative_to(root)) if manifests else None
+    expected = "exactly one Language Activity, as in the base"
+    if len(activities) == 1:
+        report.findings.append(Finding.pass_("ARCH_LANGUAGE_SINGLE_ACTIVITY", "architecture", expected, activities[0], location))
+    elif not activities:
+        report.findings.append(Finding.fail(
+            "ARCH_LANGUAGE_SINGLE_ACTIVITY",
+            "architecture",
+            expected,
+            "no Activity for the Language screen is declared in the manifest",
+            "Add a single `LanguageActivity` and declare it in AndroidManifest.xml, following the Infinity base.",
+            location,
+        ))
+    else:
+        report.findings.append(Finding.fail(
+            "ARCH_LANGUAGE_SINGLE_ACTIVITY",
+            "architecture",
+            expected,
+            f"Language is split across {len(activities)} Activities: {', '.join(activities)}",
+            "Merge them into one `LanguageActivity` that swaps between the nativeLanguageAdLive and nativeLanguageClickAdLive observers, as the base does.",
+            location,
+        ))
+
+
 def _check_primary_screen_activities(
     report: AuditReport,
     root: Path,
@@ -872,10 +953,7 @@ def _check_primary_screen_activities(
             if screen:
                 fragments[_simple_class_name(class_name)] = (screen, str(path.relative_to(root)))
 
-    activity_names: set[str] = set()
-    for path in manifests:
-        for class_name in re.findall(r'<activity\b[^>]*(?:android:)?name\s*=\s*["\']([^"\']+)["\']', _read(path)):
-            activity_names.add(_simple_class_name(class_name))
+    activity_names = _manifest_activity_names(manifests)
 
     if not fragments:
         report.findings.append(Finding.pass_(
@@ -1447,6 +1525,8 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
         report.findings.append(Finding.fail("ARCH_DIRECT_SDK_BYPASS", "architecture", "SDK calls centralized in AdsManager", "; ".join(bypasses), "Move direct ad load/show calls into AdsManager unless documented as an approved exception."))
     else:
         report.findings.append(Finding.pass_("ARCH_DIRECT_SDK_BYPASS", "architecture", "no unapproved direct Activity SDK calls", "none found"))
+    _check_screen_architecture(report, root, manifests)
+    _check_language_single_activity(report, root, manifests)
     _check_primary_screen_activities(report, root, manifests, source_paths, navigation_paths)
     _check_screen_flow_rules(report, root, source_paths, contract)
     if overrides_path is None and (root / "ads-audit-overrides.yaml").is_file():

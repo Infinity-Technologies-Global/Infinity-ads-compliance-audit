@@ -136,7 +136,18 @@ separate `Activity` classes. If any of them is a `Fragment` inside a
 single-Activity navigation graph, report `ARCH_PRIMARY_SCREENS_ACTIVITY` as
 `FAIL` and require migration. A `Fragment` used as a *page inside* one of those
 Activities — `OnboardingPageFragment` in a `ViewPager2` — is correct base
-structure, not a violation.
+structure, not a violation. `ARCH_SCREEN_ARCHITECTURE` answers the wider
+question first: the manifest must declare at least two primary-screen
+Activities, which catches a single-Activity app whose destinations are not
+named after screens and so escape the Fragment check.
+
+**Language is one Activity.** `ARCH_LANGUAGE_SINGLE_ACTIVITY` fails when the
+manifest declares more than one Activity whose name contains `Language`, and
+when it declares none. The base keeps the language list and the language-click
+native in a single `LanguageActivity` that swaps between the
+`nativeLanguageAdLive` and `nativeLanguageClickAdLive` observers; a second
+Activity loses that swap, so both natives can render. Tell the partner to merge
+them rather than to add the missing observer calls to each half.
 
 **Config.** Every CSV key/ID exists in release `ad_config.json` and matches
 exactly. `ad_config_debug.json` is deliberately different and is never compared

@@ -1268,6 +1268,80 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("FLOW_INTER_ONBOARDING_SHOW").status, "FAIL")
 
+    def test_flags_a_single_activity_architecture_with_no_named_fragments(self):
+        self.write_project()
+        (self.root / "app/src/main/AndroidManifest.xml").write_text(
+            '<manifest><application><activity android:name=".MainActivity"/></application></manifest>',
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("ARCH_SCREEN_ARCHITECTURE")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("single-Activity architecture", finding.observed)
+
+    def test_accepts_a_multi_activity_journey(self):
+        self.write_full_base_flow_project()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("ARCH_SCREEN_ARCHITECTURE")
+        self.assertEqual(finding.status, "PASS")
+        self.assertIn("LanguageActivity", finding.observed)
+
+    def test_language_must_use_exactly_one_activity(self):
+        self.write_full_base_flow_project()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("ARCH_LANGUAGE_SINGLE_ACTIVITY")
+        self.assertEqual(finding.status, "PASS")
+        self.assertEqual(finding.observed, "LanguageActivity")
+
+    def test_flags_a_language_screen_split_across_two_activities(self):
+        self.write_full_base_flow_project()
+        manifest = self.root / "app/src/main/AndroidManifest.xml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                '<activity android:name=".LanguageActivity"/>',
+                '<activity android:name=".LanguageActivity"/><activity android:name=".LanguageClickActivity"/>',
+            ),
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("ARCH_LANGUAGE_SINGLE_ACTIVITY")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("split across 2 Activities", finding.observed)
+        self.assertIn("LanguageClickActivity", finding.observed)
+
+    def test_a_split_language_screen_makes_the_language_area_error(self):
+        findings = [
+            Finding.fail("ARCH_LANGUAGE_SINGLE_ACTIVITY", "architecture", "one", "two", "merge"),
+        ]
+
+        report = area_rollup.area_rollup(findings, "Demo", "com.example.demo")
+
+        language = next(area for area in report.areas if area.name == "Language")
+        self.assertEqual(language.status, "Error")
+        self.assertIn("Language không dùng 1 Activity", language.reason)
+
+    def test_flags_missing_language_activity(self):
+        self.write_project()
+        (self.root / "app/src/main/AndroidManifest.xml").write_text(
+            '<manifest><application><activity android:name=".SplashActivity"/>'
+            '<activity android:name=".OnBoardingActivity"/></application></manifest>',
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("ARCH_LANGUAGE_SINGLE_ACTIVITY")
+        self.assertEqual(finding.status, "FAIL")
+        self.assertIn("no Activity for the Language screen", finding.observed)
+
     def test_flags_single_activity_primary_fragment_architecture(self):
         self.write_project()
         manifest = self.root / "app/src/main/AndroidManifest.xml"

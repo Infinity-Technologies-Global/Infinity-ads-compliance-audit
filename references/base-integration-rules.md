@@ -57,6 +57,8 @@ The auditor emits these base-flow rule ids in addition to app identity/config ch
 - `ARCH_ADS_MANAGER_INTER_GATES`
 - `ARCH_ADS_MANAGER_BANNER`
 - `ARCH_BANNER_BASE_RELOAD`
+- `ARCH_SCREEN_ARCHITECTURE`
+- `ARCH_LANGUAGE_SINGLE_ACTIVITY`
 - `FLOW_SPLASH_REMOTE_CONFIG`
 - `FLOW_SPLASH_INTER_PRELOAD_LANGUAGE`
 - `FLOW_SPLASH_OPEN_RESUME`
@@ -83,6 +85,23 @@ A `Fragment` used as a page *inside* one of those Activities is correct base
 structure — `OnboardingPageFragment` inside `OnBoardingActivity`'s `ViewPager2`
 is the canonical example. The violation is implementing one of the five screens
 themselves as destinations in a single-Activity navigation graph.
+
+Three rules cover this, from the widest to the narrowest:
+
+| Rule | Question it answers |
+| --- | --- |
+| `ARCH_SCREEN_ARCHITECTURE` | Does the manifest declare a multi-Activity ads journey at all, or is the app single-Activity? Fewer than two primary-screen Activities is a failure, which catches a Compose or nav-graph app whose destinations are not named after screens. |
+| `ARCH_PRIMARY_SCREENS_ACTIVITY` | Is any primary screen implemented as a `*Fragment` with no matching Activity? |
+| `ARCH_LANGUAGE_SINGLE_ACTIVITY` | Is Language exactly one Activity? |
+
+Language is the one screen that must be a *single* Activity. `LanguageActivity`
+owns both the language list and the language-click native, swapping between the
+`nativeLanguageAdLive` and `nativeLanguageClickAdLive` observers — the two are
+mutually exclusive. An app that splits the screen into a second Activity (for
+example `LanguageActivity` plus `LanguageClickActivity`) loses that swap, so
+both natives can render and the click native is charged against the wrong
+screen. Two or more manifest Activities whose name contains `Language` is a
+failure; so is zero.
 
 ## Optional placements
 
