@@ -68,9 +68,9 @@ Both hosts also select the skill on their own when you simply describe the task
 If the two CSV files already sit in the project, drop the Documents block —
 they are discovered automatically.
 
-The agent runs the bundled auditor, reads the generated reports, checks each
-finding against the code, and sends the sanitized report to Discord unless you
-ask for a local-only run.
+The agent runs the bundled auditor, reads the generated local reports, and
+checks each finding against the code. Discord or spreadsheet delivery is
+optional and requires explicit configuration.
 
 ### The two documents
 
@@ -160,7 +160,7 @@ key and ID exactly. Some placements — `native_home`, `native_permission`,
 `AdsManager` but are not wired to a screen in the base, so they land here by
 design.
 
-## Discord webhook
+## Optional Discord webhook
 
 One short message per audit, no attachment:
 
@@ -184,34 +184,32 @@ inherited environment configuration.
 
 ## Audit spreadsheet
 
-Each audit appends one row:
+Every audit appends one row to Infinity's shared audit sheet:
 
 `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
 
-The rows arrive through a Google Apps Script Web App bound to the spreadsheet;
-`templates/apps-script-sheet.gs` is the script to paste into it.
+This works with no setup. The skill ships both the Google Apps Script Web App
+URL and its shared secret, so an installed skill logs each run automatically.
+The secret is write-only — it can append a row to the `Audit Log` tab and
+nothing else (no read, no edit, no delete).
 
-The endpoint is embedded in the skill. **The shared secret is not** — this skill
-gets packaged into partner repositories, so the secret would travel with it. Set
-it yourself. In Apps Script, open **Project Settings > Script Properties** and
-add the required `ADS_AUDIT_SHEET_TOKEN` property. Then give the auditor the
-same value:
+To send results somewhere else instead, override any of:
 
-```bash
-export ADS_AUDIT_SHEET_TOKEN=<the secret configured in the Apps Script>
-```
+- `--sheet-url` / `ADS_AUDIT_SHEET_URL` — the endpoint;
+- `--sheet-token` / `ADS_AUDIT_SHEET_TOKEN` / a `scripts/.sheet-token` file — the secret.
 
-Without it the push is skipped with a note on stderr and the audit still
-succeeds. Disable it outright with `--no-sheet`, or point somewhere else with
-`--sheet-url` / `ADS_AUDIT_SHEET_URL`.
+`templates/apps-script-sheet.gs` is the deployed receiver script, for
+reproducing or rotating the deployment. Pass `--no-sheet` to skip the push
+entirely; the audit still succeeds and still writes its local reports.
 
 ## Running the auditor directly
 
 Useful for CI or debugging; the AI path above is the intended one.
 
 ```bash
-python3 scripts/run_audit.py --project /path/to/app --no-webhook
+python3 scripts/run_audit.py --project /path/to/app --no-webhook --no-sheet
 python3 scripts/run_audit.py --project . \
+  --no-webhook --no-sheet \
   --ads-script "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "./working file.csv"
 ```

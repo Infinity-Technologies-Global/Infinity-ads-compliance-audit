@@ -35,11 +35,17 @@ if ($Targets.Count -eq 0) {
 }
 
 Write-Host "⏳ Installing skill files..."
+$ExcludedNames = @(
+    ".agents", ".claude", ".codex", ".git", ".pytest_cache", ".superpowers",
+    "CLAUDE.md", "__pycache__", "ads-audit-output", "node_modules"
+)
 foreach ($Target in $Targets) {
     if (!(Test-Path -Path $Target)) {
         New-Item -ItemType Directory -Force -Path $Target | Out-Null
     }
-    Get-ChildItem -Path $ScriptDir -Exclude ".git", "CLAUDE.md", "__pycache__", "ads-audit-output", "node_modules" | Copy-Item -Destination $Target -Recurse -Force
+    Get-ChildItem -Force -Path $ScriptDir |
+        Where-Object { $_.Name -notin $ExcludedNames } |
+        Copy-Item -Destination $Target -Recurse -Force
     Write-Host "   ✅ Installed to: $Target"
 }
 

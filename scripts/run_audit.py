@@ -18,11 +18,31 @@ from sheet_push import build_row, post_row
 
 
 # Discord delivery is opt-in. Configure the endpoint per run or via the environment.
-# The Apps Script Web App bound to the Infinity audit spreadsheet. Safe to embed:
-# the script rejects any request without the matching shared secret, which is
-# deliberately NOT stored here — package_skill.py ships this file to partners.
+# The Apps Script Web App and its shared secret for the Infinity audit spreadsheet.
+# Both are shipped so a partner with only the skill installed gets the Sheet log
+# for free. The secret grants one capability — append a row to the "Audit Log"
+# tab. It cannot read, edit, or delete anything. Rotate it by changing the value
+# here and in the Apps Script (templates/apps-script-sheet.gs) together.
 DEFAULT_SHEET_URL = "https://script.google.com/macros/s/AKfycbyKxCaMNLKZPlQRGr37QcWbcut-EkkKvazqqsFeKrOstcygchWBjMmNu3uy2ckJNUUyJg/exec"
+DEFAULT_SHEET_TOKEN = "report-ads"
+# An operator may still override the shipped secret without editing this file:
+# scripts/.sheet-token (gitignored) or the ADS_AUDIT_SHEET_TOKEN environment
+# variable both win over DEFAULT_SHEET_TOKEN.
+SHEET_TOKEN_FILE = Path(__file__).resolve().parent / ".sheet-token"
 CSV_SKIP_DIRS = {".git", ".gradle", ".idea", ".agents", ".codex", "ads-audit-output", "build", "node_modules", "out"}
+
+
+def configured_sheet_token() -> str | None:
+    """Sheet secret from an override, else the shipped default.
+
+    Priority: scripts/.sheet-token file, then ADS_AUDIT_SHEET_TOKEN, then the
+    bundled DEFAULT_SHEET_TOKEN. Returns None only when the default is blanked.
+    """
+    try:
+        token = SHEET_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    return token or os.environ.get("ADS_AUDIT_SHEET_TOKEN") or DEFAULT_SHEET_TOKEN or None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -220,12 +240,11 @@ def main(argv: list[str] | None = None) -> int:
             area_report = area_rollup(report.findings, checklist_name(report), checklist_package(report))
             summary_path.write_text(render_summary(report, area_report), encoding="utf-8")
             findings_path.write_text(json.dumps(findings_payload(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    sheet_token = args.sheet_token or os.environ.get("ADS_AUDIT_SHEET_TOKEN")
+    sheet_token = args.sheet_token or configured_sheet_token()
     sheet_url = None if args.no_sheet else (args.sheet_url or os.environ.get("ADS_AUDIT_SHEET_URL") or DEFAULT_SHEET_URL)
     if sheet_url and not sheet_token:
-        # A partner running this skill has no business writing to Infinity's
-        # sheet, so a missing secret is a skip, not a failure.
-        print("Sheet push skipped: set ADS_AUDIT_SHEET_TOKEN or pass --sheet-token.", file=sys.stderr)
+        # Only reached when the shipped default secret has been blanked out.
+        print("Sheet push skipped: no shared secret configured.", file=sys.stderr)
     elif sheet_url:
         error = post_row(sheet_url, build_row(area_report, sheet_token))
         if error:

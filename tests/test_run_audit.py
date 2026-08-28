@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -28,13 +29,15 @@ import sheet_push  # noqa: E402
 
 
 class PackageSkillTest(unittest.TestCase):
-    def test_partner_package_excludes_internal_docs_and_workspace_metadata(self):
-        """Internal planning files must never become partner-package contents."""
+    def test_partner_package_ships_docs_but_not_workspace_metadata(self):
+        """Docs ride along so a bare skill is runnable; agent state never does."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "skill"
             (root / "docs" / "superpowers").mkdir(parents=True)
             (root / ".superpowers" / "sdd").mkdir(parents=True)
             (root / ".claude").mkdir()
+            (root / ".codex").mkdir()
+            (root / ".agents").mkdir()
             (root / "scripts").mkdir()
             (root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
             (root / "README.md").write_text("# partner docs\n", encoding="utf-8")
@@ -42,6 +45,8 @@ class PackageSkillTest(unittest.TestCase):
             (root / "docs" / "superpowers" / "internal.md").write_text("internal plan\n", encoding="utf-8")
             (root / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
             (root / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+            (root / ".codex" / "settings.json").write_text("internal settings\n", encoding="utf-8")
+            (root / ".agents" / "state.json").write_text("internal settings\n", encoding="utf-8")
 
             output = package_skill.package_skill(root, Path(directory) / "partner.zip")
 
@@ -50,8 +55,77 @@ class PackageSkillTest(unittest.TestCase):
 
         self.assertEqual(
             names,
-            {"skill/SKILL.md", "skill/README.md", "skill/scripts/run.py"},
+            {
+                "skill/SKILL.md",
+                "skill/README.md",
+                "skill/scripts/run.py",
+                "skill/docs/superpowers/internal.md",
+            },
         )
+
+    def test_partner_package_never_ships_the_sheet_token(self):
+        """The audit spreadsheet's shared secret stays on the operator's machine."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "skill"
+            (root / "scripts").mkdir(parents=True)
+            (root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            (root / "scripts" / "run.py").write_text("print('audit')\n", encoding="utf-8")
+            (root / "scripts" / ".sheet-token").write_text("sheet-secret-fixture", encoding="utf-8")
+
+            output = package_skill.package_skill(root, Path(directory) / "partner.zip")
+
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+
+        self.assertNotIn("skill/scripts/.sheet-token", names)
+        self.assertFalse(any(name.endswith(".sheet-token") for name in names))
+
+
+class InstallScriptTest(unittest.TestCase):
+    def test_installer_ships_docs_but_excludes_agent_workspace_metadata(self):
+        """A local install must have the same release boundary as a ZIP package."""
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            source = fixture / "source"
+            shutil.copytree(
+                repo_root,
+                source,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "ads-audit-output", "node_modules", ".sheet-token"),
+            )
+            (source / ".superpowers" / "sdd").mkdir(parents=True, exist_ok=True)
+            (source / ".superpowers" / "sdd" / "review.diff").write_text("internal review\n", encoding="utf-8")
+            (source / ".claude").mkdir(exist_ok=True)
+            (source / ".claude" / "settings.local.json").write_text("internal settings\n", encoding="utf-8")
+            (source / ".codex").mkdir(exist_ok=True)
+            os.chmod(source / ".codex", 0o755)
+            (source / ".codex" / "settings.json").write_text("internal settings\n", encoding="utf-8")
+            (source / ".agents").mkdir(exist_ok=True)
+            os.chmod(source / ".agents", 0o755)
+            (source / ".agents" / "state.json").write_text("internal state\n", encoding="utf-8")
+            home = fixture / "home"
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True)
+            environment = os.environ.copy()
+            environment.update({"HOME": str(home), "CODEX_HOME": str(codex_home)})
+
+            completed = subprocess.run(
+                ["bash", str(source / "install.sh")],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            installed = codex_home / "skills" / "infinity-ads-compliance-audit"
+            self.assertTrue((installed / "SKILL.md").is_file())
+            self.assertTrue((installed / "scripts" / "run_audit.py").is_file())
+            self.assertTrue((installed / "docs").is_dir())
+            self.assertFalse((installed / ".superpowers").exists())
+            self.assertFalse((installed / ".claude").exists())
+            self.assertFalse((installed / ".codex").exists())
+            self.assertFalse((installed / ".agents").exists())
 
 
 class AdsAuditTest(unittest.TestCase):
@@ -79,6 +153,19 @@ class AdsAuditTest(unittest.TestCase):
             ",,app-ads.txt,https://example.com/\n",
             encoding="utf-8",
         )
+
+        # Isolate the sheet secret: ignore any real scripts/.sheet-token, the
+        # shipped DEFAULT_SHEET_TOKEN, and an inherited environment secret, so
+        # each test opts in explicitly.
+        for target, value in (("SHEET_TOKEN_FILE", self.root / "absent.sheet-token"),
+                              ("DEFAULT_SHEET_TOKEN", "")):
+            p = patch.object(run_audit, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        env_patch = patch.dict(os.environ, {}, clear=False)
+        env_patch.start()
+        os.environ.pop("ADS_AUDIT_SHEET_TOKEN", None)
+        self.addCleanup(env_patch.stop)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -1007,7 +1094,8 @@ class AdsAuditTest(unittest.TestCase):
         self.assertEqual(push.call_args.args[0], run_audit.DEFAULT_SHEET_URL)
         self.assertEqual(push.call_args.args[1]["token"], "secret-token")
 
-    def test_cli_skips_the_sheet_push_without_a_token(self):
+    def test_cli_skips_the_sheet_push_when_the_default_secret_is_blanked(self):
+        # setUp already patches DEFAULT_SHEET_TOKEN to "" and hides any override.
         self.write_project()
         with patch.object(run_audit, "post_webhook", return_value=None), \
              patch.object(run_audit, "post_row", return_value=None) as push:
@@ -1016,6 +1104,68 @@ class AdsAuditTest(unittest.TestCase):
                 "--ads-script", str(self.ads_csv),
                 "--working-file", str(self.working_csv),
                 "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        push.assert_not_called()
+
+    def test_cli_pushes_with_the_shipped_default_secret(self):
+        self.write_project()
+        with patch.object(run_audit, "DEFAULT_SHEET_TOKEN", "shipped-default"), \
+             patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        push.assert_called_once()
+        self.assertEqual(push.call_args.args[0], run_audit.DEFAULT_SHEET_URL)
+        self.assertEqual(push.call_args.args[1]["token"], "shipped-default")
+
+    def test_cli_reads_the_sheet_token_from_the_token_file(self):
+        self.write_project()
+        token_file = self.root / "absent.sheet-token"
+        token_file.write_text("token-from-file\n", encoding="utf-8")
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+            ])
+
+        push.assert_called_once()
+        self.assertEqual(push.call_args.args[1]["token"], "token-from-file")
+
+    def test_explicit_sheet_token_beats_the_token_file(self):
+        self.write_project()
+        (self.root / "absent.sheet-token").write_text("file-token\n", encoding="utf-8")
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+                "--sheet-token", "flag-token",
+            ])
+
+        self.assertEqual(push.call_args.args[1]["token"], "flag-token")
+
+    def test_no_sheet_still_wins_over_the_token_file(self):
+        self.write_project()
+        (self.root / "absent.sheet-token").write_text("token-from-file\n", encoding="utf-8")
+        with patch.object(run_audit, "post_webhook", return_value=None), \
+             patch.object(run_audit, "post_row", return_value=None) as push:
+            run_audit.main([
+                "--project", str(self.root),
+                "--ads-script", str(self.ads_csv),
+                "--working-file", str(self.working_csv),
+                "--output-dir", str(self.root / "audit-output"),
+                "--no-sheet",
             ])
 
         push.assert_not_called()
@@ -1467,6 +1617,21 @@ class SheetPushTest(unittest.TestCase):
         self.assertIn("thiếu removeObservers", row["note"])
         self.assertIn("sai 3 key config", row["note"])
         self.assertIn("banner chưa theo base", row["note"])
+
+    def test_row_note_is_capped_to_one_short_line(self):
+        report = self.area_report()
+        long_reason = "x" * 300
+        report = area_rollup.AreaReport(
+            app_name=report.app_name,
+            package_name=report.package_name,
+            audit_date=report.audit_date,
+            areas=[area_rollup.AreaResult("Init", "Error", long_reason)] + report.areas[1:],
+            note="y" * 300,
+            overall="Error",
+        )
+        row = sheet_push.build_row(report, None)
+        self.assertLessEqual(len(row["note"]), sheet_push.NOTE_LIMIT)
+        self.assertTrue(row["note"].endswith("…"))
 
     def test_post_row_reads_the_reply_behind_the_redirect(self):
         posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")

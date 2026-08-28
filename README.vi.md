@@ -65,8 +65,8 @@ ads cho project này"). Gõ `/` hoặc `$` là cách chắc chắn nhất.
 
 Nếu 2 file CSV đã nằm sẵn trong project thì bỏ hẳn phần Tài liệu — skill tự tìm.
 
-AI sẽ chạy auditor, đọc báo cáo, đối chiếu từng lỗi với code thật, rồi gửi báo
-cáo đã lọc bí mật lên Discord — trừ khi bạn yêu cầu chỉ chạy local.
+AI sẽ chạy auditor, đọc các báo cáo local, rồi đối chiếu từng lỗi với code thật.
+Việc gửi Discord hoặc bảng tính là tùy chọn và cần cấu hình rõ ràng.
 
 ### Hai tài liệu đầu vào
 
@@ -156,7 +156,7 @@ hợp đồng. Một số vị trí — `native_home`, `native_permission`,
 `native_onboarding_fullscreen_*_4`, `reward_example` — có sẵn
 trong `AdsManager` nhưng dự án cơ sở không gắn vào màn nào, nên được xếp ở đây theo thiết kế.
 
-## Điểm nhận Discord
+## Điểm nhận Discord (tùy chọn)
 
 Mỗi lần kiểm tra gửi một tin nhắn ngắn, không có tệp đính kèm:
 
@@ -180,33 +180,31 @@ Việc gửi Discord chỉ được bật khi cấu hình rõ ràng. Đặt đi�
 
 ## Bảng tính kiểm tra
 
-Mỗi lần kiểm tra thêm một hàng:
+Mỗi lần kiểm tra thêm một hàng vào bảng tính kiểm tra dùng chung của Infinity:
 
 `STT | Package | App name | Ngày | Init | Splash | Language | Onboarding | Config | Note`
 
-Các hàng được gửi đến Google Apps Script Web App gắn với bảng tính;
-`templates/apps-script-sheet.gs` là tập lệnh cần dán vào đó.
+Không cần cấu hình gì. Bộ kỹ năng nhúng sẵn cả URL Google Apps Script Web App lẫn
+bí mật dùng chung, nên skill đã cài sẽ tự ghi log mỗi lần chạy. Bí mật này chỉ
+ghi được — chỉ thêm một hàng vào tab `Audit Log`, không đọc/sửa/xóa được gì.
 
-Điểm cuối được nhúng trong bộ kỹ năng. **Bí mật dùng chung thì không** — bộ kỹ năng
-này được đóng gói vào kho lưu trữ của đối tác, nên bí mật sẽ đi theo. Trong Apps
-Script, mở **Cài đặt dự án > Thuộc tính tập lệnh** và thêm thuộc tính bắt buộc
-`ADS_AUDIT_SHEET_TOKEN`. Sau đó cung cấp cùng giá trị cho auditor:
+Muốn gửi đi nơi khác thì ghi đè:
 
-```bash
-export ADS_AUDIT_SHEET_TOKEN=<bí mật đã cấu hình trong Apps Script>
-```
+- `--sheet-url` / `ADS_AUDIT_SHEET_URL` — điểm cuối;
+- `--sheet-token` / `ADS_AUDIT_SHEET_TOKEN` / file `scripts/.sheet-token` — bí mật.
 
-Không có bí mật, thao tác gửi bị bỏ qua với một ghi chú trên stderr và việc kiểm
-tra vẫn thành công. Tắt hẳn bằng `--no-sheet`, hoặc trỏ đến nơi khác với `--sheet-url` /
-`ADS_AUDIT_SHEET_URL`.
+`templates/apps-script-sheet.gs` là tập lệnh nhận đã triển khai, để tái tạo hoặc
+xoay vòng bí mật. Dùng `--no-sheet` để bỏ hẳn thao tác gửi; việc kiểm tra vẫn
+thành công và vẫn ghi báo cáo cục bộ.
 
 ## Chạy auditor trực tiếp
 
 Dùng cho CI hoặc khi cần debug; cách chuẩn vẫn là gọi qua AI ở trên.
 
 ```bash
-python3 scripts/run_audit.py --project /duong/dan/app --no-webhook
+python3 scripts/run_audit.py --project /duong/dan/app --no-webhook --no-sheet
 python3 scripts/run_audit.py --project . \
+  --no-webhook --no-sheet \
   --ads-script "https://docs.google.com/spreadsheets/d/<id>/edit#gid=0" \
   --working-file "./working file.csv"
 ```

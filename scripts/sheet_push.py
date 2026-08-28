@@ -15,6 +15,9 @@ import subprocess
 
 SHEET_FIELDS = ("package", "app_name", "date", "init", "splash", "language", "onboarding", "config", "note")
 
+# The Note cell is a glance, not a report. Keep it to one short line.
+NOTE_LIMIT = 200
+
 
 def build_row(area_report, token: str | None) -> dict:
     """Build the JSON body the Apps Script expects, one field per column."""
@@ -22,6 +25,9 @@ def build_row(area_report, token: str | None) -> dict:
     reasons = [f"{area.name}: {area.reason}" for area in area_report.areas if area.status == "Error" and area.reason]
     if area_report.note:
         reasons.append(area_report.note)
+    note = "; ".join(reasons)
+    if len(note) > NOTE_LIMIT:
+        note = note[: NOTE_LIMIT - 1] + "…"
     row = {
         "package": area_report.package_name,
         "app_name": area_report.app_name,
@@ -31,7 +37,7 @@ def build_row(area_report, token: str | None) -> dict:
         "language": statuses.get("language", ""),
         "onboarding": statuses.get("onboarding", ""),
         "config": statuses.get("config", ""),
-        "note": "; ".join(reasons),
+        "note": note,
     }
     if token:
         row["token"] = token
