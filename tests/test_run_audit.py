@@ -1656,6 +1656,12 @@ class AdsAuditTest(unittest.TestCase):
 
 
 class SheetPushTest(unittest.TestCase):
+    def setUp(self):
+        # Real retry delays would add seconds to every failure test.
+        patcher = patch.object(sheet_push, "RETRY_DELAYS", (0, 0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def area_report(self):
         return area_rollup.AreaReport(
             app_name="Demo Player",
@@ -1765,8 +1771,48 @@ class SheetPushTest(unittest.TestCase):
                           return_value=subprocess.CompletedProcess([], 7, b"", b"contains SECRET-ID")):
             result = sheet_push.post_row(url, {})
 
-        self.assertEqual(result, "curl exited with code 7")
+        self.assertEqual(result, "curl could not connect to the Apps Script host (exit code 7)")
         self.assertNotIn("SECRET-ID", result)
+
+    def test_post_row_retries_a_dns_failure_and_succeeds(self):
+        # curl exit code 6 is the DNS blip a laptop hits when systemd-resolved has
+        # not warmed its cache; the request never left the machine, so retrying it
+        # cannot append the row twice.
+        failed = subprocess.CompletedProcess([], 6, b"", b"")
+        posted = subprocess.CompletedProcess([], 0, b"302 https://script.googleusercontent.com/echo?k=1", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":true,"row":4}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[failed, posted, replied]) as run:
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {})
+
+        self.assertIsNone(result)
+        self.assertEqual(run.call_count, 3)
+
+    def test_post_row_gives_up_after_the_configured_retries(self):
+        failed = subprocess.CompletedProcess([], 6, b"", b"")
+        with patch.object(sheet_push.subprocess, "run", return_value=failed) as run:
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {})
+
+        self.assertEqual(result, "curl could not resolve the Apps Script host (DNS) (exit code 6)")
+        self.assertEqual(run.call_count, len(sheet_push.RETRY_DELAYS) + 1)
+
+    def test_post_row_does_not_retry_a_failure_that_may_have_been_delivered(self):
+        # A connection dropped mid-transfer may already have appended the row, so a
+        # retry would risk a duplicate.
+        failed = subprocess.CompletedProcess([], 56, b"", b"")
+        with patch.object(sheet_push.subprocess, "run", return_value=failed) as run:
+            result = sheet_push.post_row("https://script.google.com/macros/s/x/exec", {})
+
+        self.assertEqual(result, "curl lost the connection while transferring (exit code 56)")
+        self.assertEqual(run.call_count, 1)
+
+    def test_reading_the_reply_retries_a_dns_failure(self):
+        failed = subprocess.CompletedProcess([], 6, b"", b"")
+        replied = subprocess.CompletedProcess([], 0, b'{"ok":true,"row":9}', b"")
+        with patch.object(sheet_push.subprocess, "run", side_effect=[failed, replied]) as run:
+            result = sheet_push._read_reply("https://example.test/result", 30)
+
+        self.assertIsNone(result)
+        self.assertEqual(run.call_count, 2)
 
     def test_post_row_reports_missing_curl_and_timeouts(self):
         with patch.object(sheet_push.subprocess, "run", side_effect=FileNotFoundError):
