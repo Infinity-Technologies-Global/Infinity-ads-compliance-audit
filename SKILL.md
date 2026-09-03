@@ -131,6 +131,14 @@ that order. `DevConfig.init` receives the three `BuildConfig` version fields
 exclusions, the lifecycle observer, and the activity callbacks. Secrets come
 from string resources, never inline literals.
 
+The flow checks resolve each base class through the manifest, so a partner who
+renamed `GlobalApp` to `MyApplication` or `OnBoardingActivity` to
+`OnboardingActivity` is still audited correctly; a class declared in a
+differently named file is found too. Equivalent base/partner helper spellings
+(`view.goneView()` vs `view.gone()`, `isNetwork()` vs `isInternetAvailable()`,
+`Routes.startWelcomeActivity` vs `startActivity<WelcomeBackActivity>`) are
+treated as the same evidence.
+
 **Screen structure.** Splash, Language, Onboarding, Home, and Welcome must be
 separate `Activity` classes. If any of them is a `Fragment` inside a
 single-Activity navigation graph, report `ARCH_PRIMARY_SCREENS_ACTIVITY` as

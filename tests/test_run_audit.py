@@ -493,6 +493,119 @@ class AdsAuditTest(unittest.TestCase):
 
         self.assertEqual(report.finding("FLOW_SPLASH_BANNER").status, "PASS")
 
+    def _rename_base_flow_classes(self):
+        """Rename the base classes the way a partner app often does.
+
+        GlobalApp -> MyApplication, OnBoardingActivity -> OnboardingActivity,
+        WelcomeActivity -> WelcomeBackActivity, plus the base `.goneView()` /
+        `isNetwork()` helpers swapped for the equally common `.gone()` /
+        `isInternetAvailable()`. The app is still compliant.
+        """
+        java_dir = self.root / "app/src/main/java/com/example"
+        renames = {
+            "GlobalApp": "MyApplication",
+            "OnBoardingActivity": "OnboardingActivity",
+            "WelcomeActivity": "WelcomeBackActivity",
+        }
+        manifest = self.root / "app/src/main/AndroidManifest.xml"
+        text = manifest.read_text(encoding="utf-8").replace(
+            "<application android:label=", '<application android:name=".MyApplication" android:label='
+        )
+        for old, new in renames.items():
+            text = text.replace(f".{old}", f".{new}")
+        manifest.write_text(text, encoding="utf-8")
+
+        for path in list(java_dir.glob("*.kt")):
+            body = path.read_text(encoding="utf-8")
+            for old, new in renames.items():
+                body = body.replace(old, new)
+            body = (
+                body.replace(".goneView()", ".gone()")
+                .replace("isNetwork(this)", "isInternetAvailable()")
+                .replace("isNetwork()", "isInternetAvailable()")
+                .replace("Routes.startSplashActivity(this)", "startActivity<SplashActivity>(true)")
+                .replace("Routes.startWelcomeActivity(currentActivity)", "currentActivity.startActivity<WelcomeBackActivity>()")
+                .replace("ResumeAdsEntryRule.shouldEnableOpenResume()", "(ResumeAdsEntryRule.currentMode() == ResumeAdsEntryMode.OPEN_RESUME)")
+            )
+            target = java_dir / path.name
+            for old, new in renames.items():
+                if path.stem == old:
+                    target = java_dir / f"{new}.kt"
+            path.write_text(body, encoding="utf-8")
+            if target != path:
+                path.rename(target)
+
+    def test_renamed_base_classes_still_roll_up_to_five_done_areas(self):
+        self.write_full_base_flow_project()
+        config_path = self.root / "app/src/main/assets/ad_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        for key in ads_audit_lib.BASE_PLACEMENT_KEYS:
+            config.setdefault(key, {"id": f"ca-app-pub-123/{key}", "isEnable": True})
+        config["banner_splash"] = {"id": "ca-app-pub-123/444", "isEnable": True}
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        self._add_banner_splash_to_contract()
+        splash = self.root / "app/src/main/java/com/example/SplashActivity.kt"
+        splash.write_text(
+            splash.read_text(encoding="utf-8").replace(
+                "fun onResume(){",
+                "val bannerConfig = BannerConfig(AdRemoteConfig.banner_splash, false); fun onResume(){",
+            ),
+            encoding="utf-8",
+        )
+        self._rename_base_flow_classes()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+        rolled = area_rollup.area_rollup(report.findings, "Demo Player", "com.example.player", "2026-08-26")
+
+        errors = {area.name: area.reason for area in rolled.areas if area.status == "Error"}
+        self.assertEqual(errors, {})
+
+    def test_application_class_is_resolved_from_the_manifest_name(self):
+        self.write_full_base_flow_project()
+        self._rename_base_flow_classes()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(report.finding("ARCH_MOBILE_ADS_INIT").status, "PASS")
+        self.assertEqual(report.finding("ARCH_GLOBAL_INIT_ORDER").status, "PASS")
+        self.assertEqual(report.finding("ARCH_APP_OPEN_EXCLUSIONS").status, "PASS")
+        self.assertIn("MyApplication", report.finding("ARCH_MOBILE_ADS_INIT").location)
+
+    def test_a_renamed_onboarding_activity_is_still_found(self):
+        self.write_full_base_flow_project()
+        self._rename_base_flow_classes()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        finding = report.finding("FLOW_ONBOARDING_PRELOAD_AND_SHOW")
+        self.assertEqual(finding.status, "PASS")
+        self.assertIn("OnboardingActivity", finding.location)
+
+    def test_object_declared_in_a_differently_named_file_is_resolved(self):
+        self.write_full_base_flow_project()
+        java_dir = self.root / "app/src/main/java/com/example"
+        rule = java_dir / "ResumeAdsEntryRule.kt"
+        (java_dir / "ResumeAdsEntryMode.kt").write_text(rule.read_text(encoding="utf-8"), encoding="utf-8")
+        rule.unlink()
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(report.finding("FLOW_RESUME_RULE").status, "PASS")
+
+    def test_admanager_load_banner_call_is_not_a_direct_sdk_bypass(self):
+        self.write_full_base_flow_project()
+        main = self.root / "app/src/main/java/com/example/MainActivity.kt"
+        main.write_text(
+            "class MainActivity { fun initViews(){ "
+            "AdsManager.loadBanner(this, AdRemoteConfig.banner_home, binding.frBanner, true); "
+            "if (ERainAd.getInstance().getShouldDisplayNativeHome(AdRemoteConfig.native_home.enableUaCheck)) render() } }",
+            encoding="utf-8",
+        )
+
+        report = inspect_project(self.root, parse_ads_script(self.ads_csv), parse_working_file(self.working_csv))
+
+        self.assertEqual(report.finding("ARCH_DIRECT_SDK_BYPASS").status, "PASS")
+
     def test_compliant_base_project_rolls_up_to_five_done_areas(self):
         self.write_full_base_flow_project()
         # The fixture ships two config keys; the coverage rule wants all 24.

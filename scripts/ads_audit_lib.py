@@ -598,17 +598,34 @@ def _location(root: Path, path: Path | None, token: str | None = None) -> str | 
     return _line_ref(root, path, token) if token else str(path.relative_to(root))
 
 
-def _missing_tokens(text: str, tokens: Iterable[str]) -> list[str]:
-    return [token for token in tokens if token not in text]
+def _token_present(text: str, token) -> bool:
+    """A token is either a substring or a tuple of interchangeable spellings."""
+    if isinstance(token, (tuple, list)):
+        return any(alt in text for alt in token)
+    return token in text
 
 
-def _tokens_in_order(text: str, tokens: Iterable[str]) -> bool:
+def _token_label(token) -> str:
+    return " | ".join(token) if isinstance(token, (tuple, list)) else token
+
+
+def _token_anchor(token):
+    """The spelling to point a file:line reference at."""
+    return token[0] if isinstance(token, (tuple, list)) else token
+
+
+def _missing_tokens(text: str, tokens: Iterable) -> list[str]:
+    return [_token_label(token) for token in tokens if not _token_present(text, token)]
+
+
+def _tokens_in_order(text: str, tokens: Iterable) -> bool:
     offset = -1
     for token in tokens:
-        found = text.find(token, offset + 1)
-        if found < 0:
+        alts = token if isinstance(token, (tuple, list)) else (token,)
+        positions = [pos for pos in (text.find(alt, offset + 1) for alt in alts) if pos >= 0]
+        if not positions:
             return False
-        offset = found
+        offset = min(positions)
     return True
 
 
@@ -628,7 +645,7 @@ def _check_tokens(
     if missing:
         report.findings.append(Finding.fail(rule_id, category, expected, f"missing: {', '.join(missing)}", recommendation, _location(root, path)))
     else:
-        report.findings.append(Finding.pass_(rule_id, category, expected, "found", _location(root, path, tokens[0] if tokens else None)))
+        report.findings.append(Finding.pass_(rule_id, category, expected, "found", _location(root, path, _token_anchor(tokens[0]) if tokens else None)))
 
 
 def _check_ordered_tokens(
@@ -647,9 +664,9 @@ def _check_ordered_tokens(
     if missing:
         report.findings.append(Finding.fail(rule_id, category, expected, f"missing: {', '.join(missing)}", recommendation, _location(root, path)))
     elif not _tokens_in_order(text, tokens):
-        report.findings.append(Finding.fail(rule_id, category, expected, "tokens found but not in required order", recommendation, _location(root, path, tokens[0])))
+        report.findings.append(Finding.fail(rule_id, category, expected, "tokens found but not in required order", recommendation, _location(root, path, _token_anchor(tokens[0]))))
     else:
-        report.findings.append(Finding.pass_(rule_id, category, expected, "found in required order", _location(root, path, tokens[0])))
+        report.findings.append(Finding.pass_(rule_id, category, expected, "found in required order", _location(root, path, _token_anchor(tokens[0]))))
 
 
 def _combined_text(paths: Iterable[Path]) -> str:
@@ -760,7 +777,8 @@ def _is_banner_placement(placement: "Placement") -> bool:
     return "banner" in placement.ad_type.casefold() or placement.name.casefold().startswith("banner")
 
 
-def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], overrides: dict[str, dict[str, str]]) -> None:
+def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], overrides: dict[str, dict[str, str]], class_map: dict[str, str] | None = None) -> None:
+    class_map = class_map or {}
     source = _combined_text(source_paths)
     # Call sites verified against the Infinity base project (see
     # references/base-code-reference.md). A placement marked optional is one the
@@ -816,7 +834,9 @@ def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source
             report.findings.append(Finding.needs_mapping(rule_id, placement.description or "project-specific placement", "no approved class/event mapping", f"Add `{placement.name}` to `ads-audit-overrides.yaml` with class and required call/event evidence."))
             continue
         class_name, call = mapping
-        class_files = [path for path in source_paths if path.name == f"{class_name}.kt" or path.name == f"{class_name}.java"]
+        class_name = class_map.get(class_name, class_name)
+        resolved = _source_by_class(source_paths, class_name)
+        class_files = [resolved] if resolved is not None else []
         matching = next((path for path in class_files if call in _read(path)), None)
         if matching:
             report.findings.append(Finding.pass_(rule_id, "placement_flow", f"{class_name} calls {call}", f"found {call}", _line_ref(root, matching, call)))
@@ -830,8 +850,18 @@ def _check_flow(report: AuditReport, root: Path, contract: AuditContract, source
             report.findings.append(Finding.needs_runtime(f"RUNTIME:{placement.name}", "show only at the configured user transition", "static source cannot prove every runtime event", f"Run the placement test case for `{placement.name}` and attach video/log proof."))
 
 
+def _declares_class(text: str, class_name: str) -> bool:
+    return re.search(rf"\b(?:class|object|interface)\s+{re.escape(class_name)}\b", text) is not None
+
+
 def _source_by_class(source_paths: list[Path], class_name: str) -> Path | None:
-    return next((path for path in source_paths if path.name in {f"{class_name}.kt", f"{class_name}.java"}), None)
+    exact = next((path for path in source_paths if path.name in {f"{class_name}.kt", f"{class_name}.java"}), None)
+    if exact is not None:
+        return exact
+    # The base names a file after its class; a partner may not. `LanguageActivity`
+    # in `Language.kt`, or `object ResumeAdsEntryRule` inside `ResumeAdsEntryMode.kt`,
+    # is still that class.
+    return next((path for path in source_paths if _declares_class(_read(path), class_name)), None)
 
 
 PRIMARY_SCREEN_TOKENS = ("splash", "language", "onboarding", "home", "welcome")
@@ -860,6 +890,85 @@ def _manifest_activity_names(manifests: list[Path]) -> set[str]:
         for class_name in re.findall(r'<activity\b[^>]*(?:android:)?name\s*=\s*["\']([^"\']+)["\']', _read(path)):
             names.add(_simple_class_name(class_name))
     return names
+
+
+# Base class names the flow checks look for. A partner who renamed `GlobalApp`
+# to `MyApplication`, or `OnBoardingActivity` to `OnboardingActivity`, still has a
+# compliant app; resolve their real class off the manifest before judging it.
+BASE_SCREEN_CLASSES = (
+    "SplashActivity",
+    "LanguageActivity",
+    "OnBoardingActivity",
+    "OnboardingPageFragment",
+    "WelcomeActivity",
+    "MainActivity",
+    "SurveyActivity",
+    "ConfirmUninstallActivity",
+    "ResumeAdsEntryRule",
+    "AppLifecycleObserver",
+    "BaseActivityWithBanner",
+)
+
+
+def _manifest_application_class(manifests: list[Path]) -> str | None:
+    for path in manifests:
+        match = re.search(
+            r'<application\b[^>]*?\b(?:android:)?name\s*=\s*["\']([^"\']+)["\']',
+            _read(path),
+            flags=re.S,
+        )
+        if match:
+            return _simple_class_name(match.group(1).lstrip("."))
+    return None
+
+
+def _resolve_application_class(manifests: list[Path], source_paths: list[Path]) -> str:
+    declared = _manifest_application_class(manifests)
+    if declared and _source_by_class(source_paths, declared):
+        return declared
+    if _source_by_class(source_paths, "GlobalApp"):
+        return "GlobalApp"
+    for path in source_paths:
+        match = re.search(
+            r"\bclass\s+(\w+)\s*(?:<[^>]*>)?\s*:\s*[\w.]*(?:AdsMultiDexApplication|AdsApplication|MultiDexApplication|Application)\b",
+            _read(path),
+        )
+        if match:
+            return match.group(1)
+    return declared or "GlobalApp"
+
+
+def _class_stem(name: str) -> str:
+    normalized = _normalized_name(name)
+    return normalized[:-8] if normalized.endswith("activity") else normalized
+
+
+def _resolve_screen_class(canonical: str, source_paths: list[Path], activity_names: Iterable[str]) -> str:
+    """This app's class for a base screen, bridged through a manifest rename."""
+    if _source_by_class(source_paths, canonical):
+        return canonical
+    want = _class_stem(canonical)
+    if not want:
+        return canonical
+    candidates = sorted(
+        (
+            name for name in activity_names
+            if (want in _class_stem(name) or _class_stem(name) in want)
+            and _source_by_class(source_paths, name)
+        ),
+        key=lambda name: abs(len(name) - len(canonical)),
+    )
+    return candidates[0] if candidates else canonical
+
+
+def _build_class_map(source_paths: list[Path], manifests: list[Path]) -> dict[str, str]:
+    activity_names = _manifest_activity_names(manifests)
+    mapping = {
+        canonical: _resolve_screen_class(canonical, source_paths, activity_names)
+        for canonical in BASE_SCREEN_CLASSES
+    }
+    mapping["GlobalApp"] = _resolve_application_class(manifests, source_paths)
+    return mapping
 
 
 def _primary_activity_names(activity_names: Iterable[str]) -> list[str]:
@@ -993,12 +1102,13 @@ def _check_primary_screen_activities(
         ))
 
 
-def _check_inter_welcome_back(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], manager_text: str, global_text: str, overrides: dict[str, dict[str, str]]) -> None:
+def _check_inter_welcome_back(report: AuditReport, root: Path, contract: AuditContract, source_paths: list[Path], manager_text: str, global_text: str, overrides: dict[str, dict[str, str]], class_map: dict[str, str] | None = None) -> None:
+    class_map = class_map or {}
     if "inter_welcome_back" not in contract.placements:
         return
     override = overrides.get("inter_welcome_back", {})
-    observer_class = override.get("observer_class", "AppLifecycleObserver")
-    welcome_class = override.get("welcome_class", "WelcomeActivity")
+    observer_class = override.get("observer_class") or class_map.get("AppLifecycleObserver", "AppLifecycleObserver")
+    welcome_class = override.get("welcome_class") or class_map.get("WelcomeActivity", "WelcomeActivity")
     observer_path = _source_by_class(source_paths, observer_class)
     welcome_path = _source_by_class(source_paths, welcome_class)
     observer_text = _read(observer_path) if observer_path else ""
@@ -1006,23 +1116,23 @@ def _check_inter_welcome_back(report: AuditReport, root: Path, contract: AuditCo
     observer_tokens = (
         "ResumeAdsEntryRule.shouldShowWelcomeOnResume",
         "getShouldDisplayInterWelcomeBack",
-        "startWelcomeActivity",
+        ("startWelcomeActivity", "startActivity<WelcomeActivity", "startActivity<WelcomeBackActivity", "WelcomeActivity>(", "WelcomeBackActivity>("),
     )
-    missing_observer = [token for token in observer_tokens if token not in observer_text]
+    missing_observer = _missing_tokens(observer_text, observer_tokens)
     observer_location = str(observer_path.relative_to(root)) if observer_path else None
     if missing_observer:
         report.findings.append(Finding.fail("FLOW_INTER_WELCOME_BACK_OBSERVER", "placement_flow", "resume observer checks Welcome rule, UA gate, then routes to Welcome", f"missing: {', '.join(missing_observer)}", "Implement the resume chain: `ResumeAdsEntryRule.shouldShowWelcomeOnResume()` + `getShouldDisplayInterWelcomeBack(config.enableUaCheck)` + route to WelcomeActivity.", observer_location))
     else:
         report.findings.append(Finding.pass_("FLOW_INTER_WELCOME_BACK_OBSERVER", "placement_flow", "resume observer checks Welcome rule, UA gate, then routes to Welcome", "found", _line_ref(root, observer_path, "getShouldDisplayInterWelcomeBack")))
     welcome_tokens = ("AdsManager.loadInterWelcome", "AdsManager.showInterWelcome")
-    missing_welcome = [token for token in welcome_tokens if token not in welcome_text]
+    missing_welcome = _missing_tokens(welcome_text, welcome_tokens)
     welcome_location = str(welcome_path.relative_to(root)) if welcome_path else None
     if missing_welcome:
         report.findings.append(Finding.fail("FLOW_INTER_WELCOME_BACK_LOAD_SHOW", "placement_flow", "Welcome screen loads and shows the Welcome interstitial through AdsManager", f"missing: {', '.join(missing_welcome)}", "Load `inter_welcome_back` when Welcome starts and show it only from the configured Welcome CTA; finish/continue in the close/fail callback.", welcome_location))
     else:
         report.findings.append(Finding.pass_("FLOW_INTER_WELCOME_BACK_LOAD_SHOW", "placement_flow", "Welcome screen loads and shows the Welcome interstitial through AdsManager", "found", _line_ref(root, welcome_path, "AdsManager.loadInterWelcome")))
     required_manager_tokens = ("fun loadInterWelcome", "fun showInterWelcome", ".isEnable", "AppPurchase.getInstance().isPurchased")
-    missing_manager = [token for token in required_manager_tokens if token not in manager_text]
+    missing_manager = _missing_tokens(manager_text, required_manager_tokens)
     if missing_manager:
         report.findings.append(Finding.fail("FLOW_INTER_WELCOME_BACK_MANAGER", "placement_flow", "AdsManager load/show applies config enable and purchase gates", f"missing: {', '.join(missing_manager)}", "Implement the Welcome interstitial inside AdsManager with config enable and purchase checks."))
     else:
@@ -1035,7 +1145,11 @@ def _check_inter_welcome_back(report: AuditReport, root: Path, contract: AuditCo
     report.findings.append(Finding.needs_runtime("RUNTIME:inter_welcome_back", "resume app from background/recents, route to Welcome, tap CTA, close/fail interstitial, return to previous screen", "static analysis cannot prove lifecycle timing, ad readiness, or no duplicate App Open ad", "Record this journey with device logs/video after static checks pass."))
 
 
-def _check_global_base_rules(report: AuditReport, root: Path, global_app: Path | None, global_text: str, gradle_text: str) -> None:
+def _check_global_base_rules(report: AuditReport, root: Path, global_app: Path | None, global_text: str, gradle_text: str, class_map: dict[str, str] | None = None) -> None:
+    class_map = class_map or {}
+    _splash = class_map.get('SplashActivity', 'SplashActivity')
+    _language = class_map.get('LanguageActivity', 'LanguageActivity')
+    _onboarding = class_map.get('OnBoardingActivity', 'OnBoardingActivity')
     _check_ordered_tokens(
         report,
         root,
@@ -1086,14 +1200,20 @@ def _check_global_base_rules(report: AuditReport, root: Path, global_app: Path |
         "architecture",
         "AppOpen resume is disabled on Splash, Language, and Onboarding primary flow screens",
         global_text,
-        ("disableAppResumeWithActivity(SplashActivity::class.java", "disableAppResumeWithActivity(LanguageActivity::class.java", "disableAppResumeWithActivity(OnBoardingActivity::class.java"),
-        "Disable AppOpen resume on SplashActivity, LanguageActivity, and OnBoardingActivity in GlobalApp.initAds().",
+        (
+            f"disableAppResumeWithActivity({_splash}::class.java",
+            f"disableAppResumeWithActivity({_language}::class.java",
+            f"disableAppResumeWithActivity({_onboarding}::class.java",
+        ),
+        "Disable AppOpen resume on the Splash, Language, and Onboarding Activities in the Application's initAds().",
         global_app,
     )
 
 
-def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list[Path], contract: AuditContract) -> None:
-    splash = _source_by_class(source_paths, "SplashActivity")
+def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list[Path], contract: AuditContract, class_map: dict[str, str] | None = None) -> None:
+    class_map = class_map or {}
+    _cls = lambda name: class_map.get(name, name)
+    splash = _source_by_class(source_paths, _cls("SplashActivity"))
     splash_text = _read(splash) if splash else ""
     _check_tokens(
         report,
@@ -1113,7 +1233,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "placement_flow",
         "Splash gates inter_splash by config/network, loads splash interstitial, preloads native language onAdLoaded, and navigates onNextAction",
         splash_text,
-        ("AdRemoteConfig.inter_splash.isEnable", "isNetwork", "loadSplashInterstitialAds", "onAdLoaded", "loadNativeLanguage", "onNextAction", "moveActivity"),
+        ("AdRemoteConfig.inter_splash.isEnable", ("isNetwork", "isNetworkAvailable", "isInternetAvailable", "isInternetConnected", "hasNetwork", "isOnline"), "loadSplashInterstitialAds", "onAdLoaded", "loadNativeLanguage", ("onNextAction", "onAdClosed", "onNextActionCalled"), ("moveActivity", "startActivity", "nextScreen", "goToNext")),
         "Preserve Splash interstitial load/show and preload native language only from the splash loaded callback.",
         splash,
     )
@@ -1124,7 +1244,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "placement_flow",
         "Splash enables or disables open_resume through ResumeAdsEntryRule and AppOpenManager",
         splash_text,
-        ("ResumeAdsEntryRule.shouldEnableOpenResume", "setAppResumeAdId", "AdRemoteConfig.open_resume.id", "enableAppResume", "disableAppResume"),
+        (("ResumeAdsEntryRule.shouldEnableOpenResume", "ResumeAdsEntryRule.currentMode", "ResumeAdsEntryMode.OPEN_RESUME"), "setAppResumeAdId", ("AdRemoteConfig.open_resume.id", "open_resume.id", ".open_resume"), "enableAppResume", "disableAppResume"),
         "Configure AppOpen resume in Splash after AdRemoteConfig is initialized.",
         splash,
     )
@@ -1151,7 +1271,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
                 _location(root, splash),
             ))
 
-    language = _source_by_class(source_paths, "LanguageActivity")
+    language = _source_by_class(source_paths, _cls("LanguageActivity"))
     language_text = _read(language) if language else ""
     _check_tokens(
         report,
@@ -1160,7 +1280,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "placement_flow",
         "Language screen exposes DevSetting through tvTitle admin ads toggle",
         language_text,
-        ("tvTitle.setOnAdminAdToggleListener", "Routes.startSplashActivity"),
+        ("tvTitle.setOnAdminAdToggleListener", ("Routes.startSplashActivity", "startActivity<SplashActivity", "SplashActivity>(", "SplashActivity::class", "restartApp", "recreate(")),
         "Keep mBinding.tvTitle.setOnAdminAdToggleListener() so QA can open DevConfig/ads testing.",
         language,
     )
@@ -1171,7 +1291,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "placement_flow",
         "Language loads click native, preloads onboarding page 1, observes language LiveData, renders non-null ads, and hides null/offline ads",
         language_text,
-        ("postDelayed", "100L", "loadNativeLanguageClick", "loadNativeOnboarding1", "nativeLanguageAdLive.observe", "nativeLanguageClickAdLive.observe", "populateNativeAdView", "flAds.goneView"),
+        ("postDelayed", "100L", "loadNativeLanguageClick", "loadNativeOnboarding1", "nativeLanguageAdLive.observe", "nativeLanguageClickAdLive.observe", "populateNativeAdView", ("flAds.goneView", "flAds.gone(", "flAds.isVisible = false", "flAds.visibility")),
         "Preserve Language native/click rendering and onboarding page-1 preload after the short base delay.",
         language,
     )
@@ -1187,7 +1307,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         language,
     )
 
-    onboarding = _source_by_class(source_paths, "OnBoardingActivity")
+    onboarding = _source_by_class(source_paths, _cls("OnBoardingActivity"))
     onboarding_text = _read(onboarding) if onboarding else ""
     _check_tokens(
         report,
@@ -1201,7 +1321,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         onboarding,
     )
 
-    onboarding_page = _source_by_class(source_paths, "OnboardingPageFragment")
+    onboarding_page = _source_by_class(source_paths, _cls("OnboardingPageFragment"))
     onboarding_page_text = _read(onboarding_page) if onboarding_page else ""
     _check_tokens(
         report,
@@ -1238,9 +1358,9 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
                 _line_ref(root, onboarding_page, "observe("),
             ))
 
-    resume_rule = _source_by_class(source_paths, "ResumeAdsEntryRule")
+    resume_rule = _source_by_class(source_paths, _cls("ResumeAdsEntryRule"))
     resume_rule_text = _read(resume_rule) if resume_rule else ""
-    observer = _source_by_class(source_paths, "AppLifecycleObserver")
+    observer = _source_by_class(source_paths, _cls("AppLifecycleObserver"))
     observer_text = _read(observer) if observer else ""
     _check_tokens(
         report,
@@ -1249,12 +1369,12 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         "placement_flow",
         "Resume rule selects open_resume or welcome mode and observer blocks disabled screens before routing Welcome",
         resume_rule_text + "\n" + observer_text,
-        ("open_resume.isEnable", "native_welcome.isEnable", "inter_welcome.isEnable", "shouldEnableOpenResume", "shouldShowWelcomeOnResume", "listActivityDisableResume", "isInterstitialShowing", "getShouldDisplayInterWelcomeBack", "Routes.startWelcomeActivity"),
+        ("open_resume.isEnable", "native_welcome.isEnable", ("inter_welcome.isEnable", "inter_welcome_back.isEnable"), "shouldEnableOpenResume", "shouldShowWelcomeOnResume", "listActivityDisableResume", "isInterstitialShowing", "getShouldDisplayInterWelcomeBack", ("Routes.startWelcomeActivity", "startActivity<WelcomeActivity", "startActivity<WelcomeBackActivity", "WelcomeActivity>(", "WelcomeBackActivity>(")),
         "Preserve ResumeAdsEntryRule plus AppLifecycleObserver gating before WelcomeActivity routing.",
         observer or resume_rule,
     )
 
-    welcome = _source_by_class(source_paths, "WelcomeActivity")
+    welcome = _source_by_class(source_paths, _cls("WelcomeActivity"))
     welcome_text = _read(welcome) if welcome else ""
     _check_tokens(
         report,
@@ -1268,7 +1388,7 @@ def _check_screen_flow_rules(report: AuditReport, root: Path, source_paths: list
         welcome,
     )
 
-    banner = _source_by_class(source_paths, "BaseActivityWithBanner")
+    banner = _source_by_class(source_paths, _cls("BaseActivityWithBanner"))
     banner_text = _read(banner) if banner else ""
     _check_tokens(
         report,
@@ -1292,7 +1412,7 @@ def _check_ads_manager_base_rules(report: AuditReport, root: Path, manager_paths
         "architecture",
         "Native loads use one central helper with isEnable, purchase, network, shouldDisplay, load callback, and null fallback",
         manager_text,
-        ("loadNativeInternal", "config.isEnable", "AppPurchase.getInstance().isPurchased", "isNetworkAvailable", "shouldDisplay", "loadNativeAdResultCallback", "liveData.postValue(null)"),
+        ("loadNativeInternal", "config.isEnable", "AppPurchase.getInstance().isPurchased", ("isNetworkAvailable", "isInternetAvailable", "hasNetwork"), "shouldDisplay", ("loadNativeAdResultCallback", "loadNativeAd"), ("liveData.postValue(null)", "postValue(null)", ".value = null", "postValue(AdState.Fail)", "postValue(AdState.Failure)", "emit(AdState.Fail)")),
         "Centralize native load logic in AdsManager.loadNativeInternal with enable, purchase, network, shouldDisplay, and null fallback gates.",
         manager_path,
     )
@@ -1404,6 +1524,36 @@ def _check_base_key_coverage(report: AuditReport, root: Path, base_keys: tuple[s
         ))
 
 
+def _manifest_admob_app_id(manifests: list[Path], string_paths: list[Path]) -> str | None:
+    """The AdMob app id wired through the manifest meta-data.
+
+    A partner may set `com.google.android.gms.ads.APPLICATION_ID` to a literal id
+    or, more often, to `@string/admob_app_id`. Either is a valid alternative to a
+    Gradle `manifestPlaceholders` entry.
+    """
+    for path in manifests:
+        meta = re.search(
+            r'<meta-data\b[^>]*APPLICATION_ID[^>]*?(?:android:)?value\s*=\s*["\']([^"\']+)["\']',
+            _read(path),
+            flags=re.S,
+        )
+        if not meta:
+            continue
+        value = meta.group(1)
+        if value.startswith("ca-app-pub-"):
+            return value
+        ref = re.match(r'@string/(\w+)', value)
+        if ref:
+            for string_path in string_paths:
+                found = _first_match(
+                    rf'<string\s+name=["\']{re.escape(ref.group(1))}["\'][^>]*>\s*(ca-app-pub-[^<\s]+)',
+                    _read(string_path),
+                )
+                if found:
+                    return found
+    return None
+
+
 def _release_admob_app_id(gradle_text: str) -> str | None:
     """Read the AdMob app id from the release build type only.
 
@@ -1443,8 +1593,9 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     manifest_text = _combined_text(manifests)
     package = _first_match(r'applicationId\s*[=(]?\s*["\']([^"\']+)', gradle_text) or _first_match(r'namespace\s*[=(]?\s*["\']([^"\']+)', gradle_text)
     _check_equal(report, "APP_PACKAGE", "identity", checklist.package_name, package, "Set `applicationId` and `namespace` to the package name in the working checklist.")
-    app_id = _release_admob_app_id(gradle_text)
-    _check_equal(report, "ADMOB_APP_ID", "identity", contract.admob_app_id, app_id, "Set the AdMob manifest placeholder to the ADS Script APP ID.")
+    string_res_paths = [path for path in all_text_paths if path.name == "strings.xml" or path.parent.name.startswith("values")]
+    app_id = _release_admob_app_id(gradle_text) or _manifest_admob_app_id(manifests, string_res_paths)
+    _check_equal(report, "ADMOB_APP_ID", "identity", contract.admob_app_id, app_id, "Set the release AdMob app id through `manifestPlaceholders` or the `APPLICATION_ID` manifest meta-data.")
     if "com.google.android.gms.ads.APPLICATION_ID" not in manifest_text:
         report.findings.append(Finding.fail("ADMOB_MANIFEST_META", "identity", "AdMob APPLICATION_ID meta-data", "missing", "Add the Google Mobile Ads APPLICATION_ID meta-data entry to AndroidManifest.xml."))
     string_paths = [path for path in all_text_paths if path.name == "strings.xml"]
@@ -1465,9 +1616,10 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     firebase_text = _combined_text(firebase_files)
     firebase_found = _first_match(r'["\']project_id["\']\s*:\s*["\']([^"\']+)', firebase_text)
     _check_equal(report, "FIREBASE_PROJECT", "service", checklist.firebase_project, firebase_found, "Add the `google-services.json` for the Firebase project in the working checklist.")
-    global_app = next((path for path in source_paths if path.name in {"GlobalApp.kt", "GlobalApp.java"}), None)
+    class_map = _build_class_map(source_paths, manifests)
+    global_app = _source_by_class(source_paths, class_map["GlobalApp"])
     global_text = _read(global_app) if global_app else ""
-    _check_global_base_rules(report, root, global_app, global_text, gradle_text)
+    _check_global_base_rules(report, root, global_app, global_text, gradle_text, class_map)
     for rule_id, token, fix in (
         ("ARCH_MOBILE_ADS_INIT", "MobileAds.initialize", "Initialize Mobile Ads early in the Application."),
         ("ARCH_REMOTE_CONFIG_INIT", "AdRemoteConfig.initializeFromAssets", "Initialize asset config before ad SDK setup."),
@@ -1515,12 +1667,23 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     else:
         report.findings.append(Finding.fail("ARCH_INTERSTITIAL_INTERVAL", "architecture", "35-second interstitial interval", "not found", "Set `mERainAdConfig.intervalInterstitialAd = 35` unless the ADS Script explicitly approves another interval."))
     bypasses = []
-    direct_sdk_tokens = ("loadNativeAd", "loadBanner", "loadCollapsibleBanner", "getInterstitialAds", "forceShowInterstitial", "showRewardAds")
+    _app_class = class_map.get("GlobalApp", "GlobalApp")
+    _splash_class = class_map.get("SplashActivity", "SplashActivity")
+    direct_sdk_call = re.compile(
+        r"ERainAd\.getInstance\(\)\s*\.\s*(?:loadNativeAd|loadBanner|loadCollapsibleBanner|getInterstitialAds|forceShowInterstitial|showRewardAds)\b"
+    )
+    skip_names = {
+        "AdsManager.kt", "AdsManager.java",
+        f"{_splash_class}.kt", f"{_splash_class}.java",
+        f"{_app_class}.kt", f"{_app_class}.java",
+        "SplashActivity.kt", "SplashActivity.java", "GlobalApp.kt", "GlobalApp.java",
+    }
     for path in source_paths:
-        if path.name in {"AdsManager.kt", "AdsManager.java", "SplashActivity.kt", "SplashActivity.java", "GlobalApp.kt", "GlobalApp.java"}:
+        if path.name in skip_names:
             continue
-        if "Activity" in path.name and "ERainAd.getInstance()" in _read(path) and any(token in _read(path) for token in direct_sdk_tokens):
-            bypasses.append(_line_ref(root, path, "ERainAd.getInstance()"))
+        match = direct_sdk_call.search(_read(path))
+        if "Activity" in path.name and match:
+            bypasses.append(_line_ref(root, path, match.group(0)))
     if bypasses:
         report.findings.append(Finding.fail("ARCH_DIRECT_SDK_BYPASS", "architecture", "SDK calls centralized in AdsManager", "; ".join(bypasses), "Move direct ad load/show calls into AdsManager unless documented as an approved exception."))
     else:
@@ -1528,12 +1691,12 @@ def inspect_project(root: str | Path, contract: AuditContract, checklist: Projec
     _check_screen_architecture(report, root, manifests)
     _check_language_single_activity(report, root, manifests)
     _check_primary_screen_activities(report, root, manifests, source_paths, navigation_paths)
-    _check_screen_flow_rules(report, root, source_paths, contract)
+    _check_screen_flow_rules(report, root, source_paths, contract, class_map)
     if overrides_path is None and (root / "ads-audit-overrides.yaml").is_file():
         overrides_path = root / "ads-audit-overrides.yaml"
     overrides = _load_overrides(Path(overrides_path) if overrides_path else None)
-    _check_flow(report, root, contract, source_paths, overrides)
-    _check_inter_welcome_back(report, root, contract, source_paths, manager_text, global_text, overrides)
+    _check_flow(report, root, contract, source_paths, overrides, class_map)
+    _check_inter_welcome_back(report, root, contract, source_paths, manager_text, global_text, overrides, class_map)
     return report
 
 
